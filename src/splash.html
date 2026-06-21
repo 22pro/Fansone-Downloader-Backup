@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+  body {
+    display: grid;
+    place-items: center;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #172033;
+    background:
+      radial-gradient(circle at 80% 0%, rgba(91,108,255,.24), transparent 34%),
+      radial-gradient(circle at 12% 18%, rgba(8,182,216,.18), transparent 30%),
+      linear-gradient(180deg, #f9fbff 0%, #eef2f7 100%);
+  }
+  .card {
+    width: 342px;
+    padding: 28px 26px 24px;
+    border: 1px solid rgba(23,32,51,.10);
+    border-radius: 28px;
+    background: rgba(255,255,255,.88);
+    box-shadow: 0 24px 70px rgba(17,24,39,.16);
+    text-align: center;
+  }
+  img { width: 82px; height: 82px; object-fit: contain; filter: drop-shadow(0 16px 26px rgba(91,108,255,.22)); }
+  h1 { margin: 16px 0 6px; font-size: 22px; letter-spacing: -.03em; }
+  p { margin: 0; color: #697386; font-size: 13px; }
+  .bar { height: 7px; margin-top: 22px; border-radius: 999px; background: #e8edf8; overflow: hidden; }
+  .bar span { display: block; width: 42%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #5b6cff, #08b6d8); animation: run 1.15s ease-in-out infinite; }
+  .tip { margin-top: 14px; font-size: 12px; color: #7a8496; }
+  @keyframes run { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="../build/icon.png" />
+    <h1>FansOne 下载器</h1>
+    <p>正在准备订阅和下载工作台…</p>
+    <div class="bar"><span></span></div>
+    <div class="tip">首次启动或资源较多时需要稍等几秒</div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FansOne 下载器</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Matomo -->
+  <script>
+    var _paq = window._paq = window._paq || [];
+    _paq.push(['trackPageView']);
+    _paq.push(['enableLinkTracking']);
+    (function() {
+      var u = 'https://stats.cangify.com/';
+      _paq.push(['setTrackerUrl', u + 'matomo.php']);
+      _paq.push(['setSiteId', '3']);
+      var d = document, g = d.createElement('script'), s = d.getElementsByTagName('script')[0];
+      g.async = true; g.src = u + 'matomo.js'; s.parentNode.insertBefore(g, s);
+    })();
+  </script>
+  <!-- End Matomo Code -->
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="logo" src="../../build/icon.png" alt="FansOne Downloader" />
+        <div>
+          <h1>FansOne 下载器</h1>
+          <p>专业订阅内容备份工具</p>
+        </div>
+      </div>
+
+      <nav class="side-menu" aria-label="主菜单">
+        <button class="menu-item active" data-view="loginView">
+          <span class="menu-icon">◎</span>
+          <span><b>登录中心</b></span>
+        </button>
+        <button class="menu-item" data-view="subscriptionView">
+          <span class="menu-icon">▦</span>
+          <span><b>订阅详情</b></span>
+        </button>
+        <button class="menu-item" data-view="downloadView">
+          <span class="menu-icon">↓</span>
+          <span><b>下载状态</b></span>
+        </button>
+        <button class="menu-item" data-view="membershipView">
+          <span class="menu-icon">◆</span>
+          <span><b>会员权限</b></span>
+        </button>
+        <button class="menu-item" data-view="settingsView">
+          <span class="menu-icon">⚙</span>
+          <span><b>下载设置</b></span>
+        </button>
+        <button class="menu-item" data-view="aboutView">
+          <span class="menu-icon">i</span>
+          <span><b>关于软件</b></span>
+        </button>
+      </nav>
+
+      <section id="sidebarAd" class="sidebar-ad" role="link" tabindex="0" aria-label="广告位">
+        <div class="sidebar-ad-inner">
+          <span>AD</span>
+          <strong>250 × 250</strong>
+          <small>广告位</small>
+        </div>
+      </section>
+
+      <button id="languageToggleBtn" class="menu-item translate-toggle sidebar-bottom-toggle" type="button">
+        <span class="menu-icon">文</span>
+        <span><b>EN/中文</b></span>
+      </button>
+
+      <section class="sidebar-status">
+        <span>FO-BACKUP</span>
+        <b>Ready</b>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section id="loginView" class="view active-view login-home">
+        <div class="login-layout single">
+          <section class="hero-card login-hero">
+            <div>
+              <p class="eyebrow">Account Center</p>
+              <h3>登录中心</h3>
+              <p>连接 FansOne 账号后，即可读取订阅作者、加载帖子并开始备份。登录信息仅保存在本机。</p>
+            </div>
+            <div class="login-status-row">
+              <div id="authStatus" class="status-pill light">检查登录状态中…</div>
+              <div class="button-stack horizontal">
+                <button id="loginBtn" class="primary">登录 / 重新登录</button>
+                <button id="logoutBtn">清除登录</button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="feature-grid">
+          <section class="feature-card"><b>订阅管理</b><span>按付费/免费/取消状态筛选作者</span></section>
+          <section class="feature-card"><b>批量备份</b><span>支持视频、图片和多作者批量下载</span></section>
+          <section class="feature-card"><b>状态监控</b><span>独立下载状态页展示速度和任务明细</span></section>
+          <section class="feature-card"><b>会员加速</b><span>会员解除 100KB/s 限速并开放自定义并发</span></section>
+        </div>
+      </section>
+
+      <section id="subscriptionView" class="view">
+        <div class="section-toolbar">
+          <div>
+            <p class="eyebrow">Subscriptions</p>
+            <h3>订阅详情</h3>
+            <p>管理订阅作者、筛选帖子；下载进度请到“下载状态”查看。</p>
+          </div>
+          <div class="toolbar-actions">
+            <select id="subscriptionType">
+              <option value="all">全部订阅项目</option>
+              <option value="activePaid">订阅中 - 付费</option>
+              <option value="activeFree">订阅中 - 免费</option>
+              <option value="cancelledPaid">已取消 - 付费</option>
+              <option value="cancelledFree">已取消 - 免费</option>
+            </select>
+            <button id="refreshSubsBtn" class="primary">刷新订阅</button>
+          </div>
+        </div>
+
+        <div class="content-grid">
+          <section class="panel subscriptions-panel">
+            <div class="panel-head">
+              <div>
+                <strong>订阅作者</strong>
+                <span id="subsCount" class="muted">0</span>
+              </div>
+              <div class="inline-actions compact-actions">
+                <button id="selectAllSubsBtn">全选</button>
+                <button id="clearSubsBtn">清空</button>
+              </div>
+            </div>
+            <button id="loadSelectedSubsBtn" class="primary wide-btn action-anchor">加载选中作者帖子</button>
+            <div id="subscriptions" class="list empty">暂无数据</div>
+          </section>
+
+          <section class="panel posts-panel">
+            <div class="panel-head">
+              <div>
+                <strong id="postsTitle">帖子</strong>
+                <span id="postsCount" class="muted">0</span>
+              </div>
+              <div class="inline-actions">
+                <select id="postType">
+                  <option value="all">全部</option>
+                  <option value="video">视频</option>
+                  <option value="picture">图片</option>
+                </select>
+                <button id="selectAllBtn">全选</button>
+                <button id="clearSelectedPostsBtn">清空</button>
+                <button id="downloadSelectedBtn" class="primary">下载选中</button>
+              </div>
+            </div>
+            <div id="posts" class="list empty">请选择一个作者</div>
+          </section>
+        </div>
+
+      </section>
+
+      <section id="downloadView" class="view">
+        <div class="section-toolbar">
+          <div>
+            <p class="eyebrow">Download Monitor</p>
+            <h3>下载状态</h3>
+            <p>集中查看下载进度、速度、剩余数量、当前文件与失败信息。</p>
+          </div>
+          <div class="toolbar-actions">
+            <button id="pauseDownloadsBtn">暂停</button>
+            <button id="resumeDownloadsBtn" disabled>继续</button>
+            <button id="retryFailedDownloadsBtn" disabled>重试失败</button>
+            <button id="clearDownloadRecordsBtn" class="danger">清空记录</button>
+            <button id="openDownloadDirBtn" class="primary">打开保存目录</button>
+          </div>
+        </div>
+
+        <div class="download-dashboard">
+          <div class="metric-card"><span>总任务</span><b id="downloadTotal">0</b><small>已加入队列</small></div>
+          <div class="metric-card"><span>进行中</span><b id="downloadActive">0</b><small>下载/等待/暂停</small></div>
+          <div class="metric-card"><span>已完成</span><b id="downloadDone">0</b><small>成功备份</small></div>
+          <div class="metric-card"><span>失败</span><b id="downloadErrors">0</b><small>需要检查</small></div>
+          <div class="metric-card wide"><span>当前速度</span><b id="downloadSpeed">--</b><small id="downloadEta">预计 --</small></div>
+        </div>
+
+        <section class="panel current-download-panel">
+          <div class="panel-head clean">
+            <div>
+              <strong id="downloadStateTitle">暂无下载任务</strong>
+              <span id="downloadStateSubtitle" class="muted">选择帖子后点击下载，任务会显示在这里。</span>
+            </div>
+            <span id="downloadPercent" class="download-percent">0%</span>
+          </div>
+          <div class="progress overall"><div id="downloadProgressBar" style="width:0%"></div></div>
+          <div id="activeJobCard" class="active-job-card empty">暂无正在下载的内容</div>
+        </section>
+
+        <section class="panel downloads-panel expanded">
+          <div class="panel-head">
+            <div>
+              <strong>任务明细</strong>
+              <span class="muted">显示当前队列、已完成和失败任务</span>
+            </div>
+          </div>
+          <div id="jobs" class="jobs empty">暂无任务</div>
+        </section>
+      </section>
+
+      <section id="membershipView" class="view">
+        <section class="membership-banner">
+          <div class="membership-banner-main">
+            <span id="membershipBannerTag">当前方案：免费会员</span>
+            <h3>会员权限</h3>
+            <p id="membershipBannerDesc">免费会员限速 100KB/s，分片并发固定为 1。</p>
+          </div>
+          <div class="membership-banner-side">
+            <strong>会员解锁权限</strong>
+            <p>开通任意会员后解放 100KB/s 限速，并开放分片并发自定义设置。</p>
+          </div>
+        </section>
+
+        <section class="member-summary-card">
+          <div class="member-summary-main">
+            <strong>我的会员</strong>
+            <p id="memberSummaryText">当前等级：免费会员</p>
+          </div>
+          <div class="member-summary-box">
+            <span>当前档位</span>
+            <b id="memberTierText">免费会员</b>
+          </div>
+          <div class="member-summary-box">
+            <span>到期时间</span>
+            <b id="memberExpireText">--</b>
+          </div>
+          <div class="member-summary-box">
+            <span>剩余时间</span>
+            <b id="memberRemainText">--</b>
+          </div>
+        </section>
+
+        <div class="plans-grid pricing-grid">
+          <button class="plan-card pricing-card test-plan startPayment" data-plan="test">
+            <span class="plan-tag">测试</span>
+            <strong>测试会员</strong>
+            <div class="plan-price"><b>¥1</b><small>/5分钟</small></div>
+            <ul>
+              <li>体验会员完整权限</li>
+              <li>解放 100KB/s 速度上限</li>
+              <li>分片并发可自行调整</li>
+            </ul>
+            <em>开通测试</em>
+          </button>
+          <button class="plan-card pricing-card startPayment" data-plan="monthly">
+            <span class="plan-tag">入门</span>
+            <strong>月度会员</strong>
+            <div class="plan-price"><b>¥15</b><small>/30天</small></div>
+            <ul>
+              <li>解锁下载权限设置</li>
+              <li>解放 100KB/s 速度上限</li>
+              <li>分片并发可自行调整</li>
+            </ul>
+            <em>开通月度</em>
+          </button>
+          <button class="plan-card pricing-card recommended startPayment" data-plan="quarterly">
+            <span class="plan-tag">推荐</span>
+            <strong>季度会员</strong>
+            <div class="plan-price"><b>¥45</b><small>/90天</small></div>
+            <ul>
+              <li>解锁下载权限设置</li>
+              <li>解放 100KB/s 速度上限</li>
+              <li>分片并发可自行调整</li>
+            </ul>
+            <em>开通季度</em>
+          </button>
+          <button class="plan-card pricing-card startPayment" data-plan="yearly">
+            <span class="plan-tag">长期</span>
+            <strong>年度会员</strong>
+            <div class="plan-price"><b>¥150</b><small>/365天</small></div>
+            <ul>
+              <li>解锁下载权限设置</li>
+              <li>解放 100KB/s 速度上限</li>
+              <li>分片并发可自行调整</li>
+            </ul>
+            <em>开通年度</em>
+          </button>
+        </div>
+      </section>
+
+      <section id="settingsView" class="view">
+        <div class="section-toolbar">
+          <div>
+            <p class="eyebrow">Settings</p>
+            <h3>下载设置</h3>
+            <p>设置保存目录、下载并发，并检查软件更新。</p>
+          </div>
+        </div>
+        <div class="card-grid settings-stack">
+          <section class="panel settings-panel">
+            <div class="panel-head clean">
+              <div>
+                <strong>保存目录</strong>
+                <span class="muted">所有备份文件会保存到这里。</span>
+              </div>
+            </div>
+            <div id="downloadDir" class="path-box"></div>
+            <button id="chooseDirBtn" class="wide-btn">选择保存目录</button>
+          </section>
+          <section class="panel settings-panel">
+            <div class="panel-head clean">
+              <div>
+                <strong>下载参数</strong>
+                <span class="muted">会员可使用更高并发。</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>分片并发</label>
+              <input id="concurrencyInput" type="number" min="1" max="20" />
+            </div>
+            <div class="button-stack horizontal">
+              <button id="saveConfigBtn" class="primary">保存设置</button>
+              <button id="checkUpdateBtn">检查软件更新</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="aboutView" class="view about-view">
+        <section class="about-card">
+          <div class="about-hero">
+            <img class="about-logo" src="../../build/icon.png" alt="FansOne Downloader" />
+            <div>
+              <p class="eyebrow">About FO-BACKUP</p>
+              <h3>关于软件</h3>
+              <p>FO-BACKUP 是一款面向 FansOne 内容备份与整理的桌面工具，帮助你把订阅作者、视频和图片内容稳定保存到本地。</p>
+            </div>
+          </div>
+
+          <div class="about-features">
+            <section>
+              <strong>订阅内容备份</strong>
+              <p>支持刷新订阅作者，按作者加载帖子，并批量备份视频与图片。</p>
+            </section>
+            <section>
+              <strong>规则化整理</strong>
+              <p>按作者、内容类型和发布时间整理文件，减少手动分类成本。</p>
+            </section>
+            <section>
+              <strong>任务更稳定</strong>
+              <p>支持暂停恢复、失败提示、进度记录和已下载内容跳过。</p>
+            </section>
+            <section>
+              <strong>会员权限</strong>
+              <p>会员可解除免费版限速，并开放分片并发自定义设置。</p>
+            </section>
+          </div>
+
+          <div class="about-footer">
+            <button id="officialSiteBtn" class="about-link" type="button">官网：cangify.com</button>
+            <span>当前版本：v1.0.7</span>
+          </div>
+        </section>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="updateDialog" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <strong id="updateTitle">软件更新</strong>
+          <p id="updateSubtitle">正在检查更新…</p>
+        </div>
+        <button id="closeUpdateDialogBtn" class="icon-btn" title="关闭">×</button>
+      </div>
+      <div id="updateNotes" class="modal-body"></div>
+      <div id="updateLink" class="update-link"></div>
+      <div class="modal-actions">
+        <button id="copyUpdateLinkBtn">复制链接</button>
+        <button id="laterUpdateBtn">稍后</button>
+        <button id="downloadUpdateBtn" class="primary">立即下载</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=20260619-lang3"></script>
+</body>
+</html>

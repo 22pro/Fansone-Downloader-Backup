@@ -1,0 +1,1384 @@
+import { app, BrowserWindow, ipcMain, dialog, shell, session, Menu, clipboard } from 'electron';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { promises as fs } from 'node:fs';
+import { createWriteStream, createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import axios from 'axios';
+import dayjs from 'dayjs';
+import PQueue from 'p-queue';
+import got from 'got';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const DATA_DIR = path.join(app.getPath('userData'), 'fansone-desktop');
+const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+const STATE_PATH = path.join(DATA_DIR, 'state.json');
+const APP_STATE_PATH = path.join(DATA_DIR, 'app-state.json');
+const LOGIN_PARTITION = 'persist:fansone';
+const BASE_URL = 'https://fansone.co';
+const API_BASE = `${BASE_URL}/api`;
+const HTTP_TIMEOUT_MS = 45 * 1000;
+const UPDATE_FEED_URL = 'https://cangify.com/globle/update/fo-backup.json';
+const SIDEBAR_AD_FEED_URL = 'https://cangify.com/globle/ads/fo-backup/fo-backup.json';
+const PAYMENT_SERVER_URL = 'https://cangify.com/globle/epay/fo-backup-pay';
+const FREE_SPEED_LIMIT_BPS = 100 * 1024;
+
+// Ubuntu 上 npm 安装的 Electron 常见 chrome-sandbox 权限不满足；本工具只加载本地 UI + FansOne 登录页。
+app.commandLine.appendSwitch('no-sandbox');
+
+let mainWindow;
+let loginWindow;
+let paymentWindow;
+let splashWindow;
+let downloadManager;
+let paymentPollTimer = null;
+let runtimeConfigCache = null;
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function compareVersions(a, b) {
+  const left = String(a || '0').replace(/^v/i, '').split(/[.-]/).map(part => Number.parseInt(part, 10) || 0);
+  const right = String(b || '0').replace(/^v/i, '').split(/[.-]/).map(part => Number.parseInt(part, 10) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function checkUpdate(url = UPDATE_FEED_URL) {
+  const currentVersion = app.getVersion();
+  const response = await got.get(url, {
+    responseType: 'json',
+    timeout: { request: 12000 },
+    retry: { limit: 1 },
+    headers: { 'Cache-Control': 'no-cache' }
+  });
+  const data = response.body || {};
+  const latestVersion = data.latest_version || data.version || data.latestVersion;
+  if (!latestVersion) throw new Error('更新 JSON 缺少 latest_version/version 字段。');
+  const downloadUrl = data.download_url || data.windows_download_url || data.url || data.homepage || '';
+  return {
+    ok: true,
+    feedUrl: url,
+    currentVersion,
+    latestVersion,
+    hasUpdate: compareVersions(latestVersion, currentVersion) > 0,
+    mandatory: Boolean(data.mandatory),
+    releaseDate: data.release_date || data.releaseDate || '',
+    notes: Array.isArray(data.notes) ? data.notes : (data.notes ? [String(data.notes)] : []),
+    downloadUrl,
+    homepage: data.homepage || '',
+    raw: data
+  };
+}
+
+function normalizeSidebarAdItem(item = {}) {
+  const imageUrl = item.imageUrl || item.image_url || item.image || item.src || '';
+  const linkUrl = item.linkUrl || item.link_url || item.link || item.url || item.href || '';
+  return {
+    enabled: item.enabled !== false && Boolean(imageUrl && linkUrl),
+    imageUrl,
+    linkUrl,
+    alt: item.alt || item.title || 'FO-BACKUP 广告',
+    title: item.title || ''
+  };
+}
+
+async function getSidebarAd(url = SIDEBAR_AD_FEED_URL) {
+  const response = await got.get(url, {
+    responseType: 'json',
+    timeout: { request: 12000 },
+    retry: { limit: 1 },
+    headers: { 'Cache-Control': 'no-cache' }
+  });
+  const body = response.body || {};
+  const rawAds = Array.isArray(body.ads) ? body.ads : [body];
+  const ads = rawAds.map(normalizeSidebarAdItem).filter(item => item.enabled);
+  const first = ads[0] || normalizeSidebarAdItem({ enabled: false });
+  const intervalSeconds = Math.max(2, Math.min(60, Number(body.intervalSeconds || body.interval_seconds || 5) || 5));
+  const refreshSeconds = Math.max(10, Math.min(3600, Number(body.refreshSeconds || body.refresh_seconds || 60) || 60));
+  return {
+    ok: true,
+    enabled: body.enabled !== false && ads.length > 0,
+    imageUrl: first.imageUrl,
+    linkUrl: first.linkUrl,
+    alt: first.alt,
+    title: first.title,
+    ads,
+    intervalSeconds,
+    refreshSeconds,
+    cacheKey: String(body.updatedAt || body.updated_at || body.version || Date.now()),
+    feedUrl: url,
+    raw: body
+  };
+}
+
+class DownloadPausedError extends Error {
+  constructor(message = '下载已暂停') {
+    super(message);
+    this.name = 'DownloadPausedError';
+  }
+}
+
+function formatBytes(bytes = 0) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function updateJobTransfer(job, { progress, downloadedBytes, totalItems, doneItems } = {}) {
+  if (!job) return;
+  const now = Date.now();
+  if (!job.startedAt) job.startedAt = now;
+  if (typeof progress === 'number') job.progress = progress;
+  if (typeof totalItems === 'number') job.totalItems = totalItems;
+  if (typeof doneItems === 'number') job.doneItems = doneItems;
+
+  if (typeof downloadedBytes === 'number') {
+    const previousBytes = Number(job.downloadedBytes) || 0;
+    const previousSpeedAt = Number(job.lastSpeedAt) || now;
+    const deltaBytes = Math.max(0, downloadedBytes - previousBytes);
+    const deltaSeconds = Math.max((now - previousSpeedAt) / 1000, 0.1);
+    const instantSpeed = deltaBytes / deltaSeconds;
+
+    job.downloadedBytes = downloadedBytes;
+    job.lastSpeedAt = now;
+    // Smooth the value a little so it does not jump wildly between HLS segments.
+    job.speedBytes = job.speedBytes
+      ? Math.round(job.speedBytes * 0.45 + instantSpeed * 0.55)
+      : Math.round(instantSpeed);
+  }
+
+  job.speedText = job.status === 'running' ? `${formatBytes(job.speedBytes || 0)}/s` : '';
+  job.transferText = job.totalItems ? `${job.doneItems || 0}/${job.totalItems}` : '';
+}
+
+function isMember(config = {}) {
+  const membership = config.membership || {};
+  if (membership.plan !== 'member') return false;
+  if (!membership.expiresAt) return false;
+  const expiresAt = new Date(membership.expiresAt).getTime();
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
+function planLabel(tier) {
+  return ({ test: '测试会员', monthly: '月度会员', quarterly: '季度会员', yearly: '年度会员' })[tier] || '会员';
+}
+
+function normalizeMembership(membership = {}) {
+  const tier = membership.tier || membership.planId || 'monthly';
+  const days = Number(membership.days || ({ test: 0, monthly: 30, quarterly: 90, yearly: 365 })[tier] || 30);
+  const minutes = Number(membership.minutes || ({ test: 5 })[tier] || 0);
+  const activatedAt = membership.activatedAt || new Date().toISOString();
+  const durationMs = minutes > 0 ? minutes * 60 * 1000 : days * 86400000;
+  const expiresAt = membership.expiresAt || new Date(Date.now() + durationMs).toISOString();
+  return {
+    ...membership,
+    plan: 'member',
+    tier,
+    days,
+    minutes,
+    activatedAt,
+    expiresAt,
+    goodsName: membership.goodsName || `FO-BACKUP ${planLabel(tier)}`,
+    permissions: {
+      downloadThreads: 8,
+      speedLimit: 0,
+      ...(membership.permissions || {})
+    },
+    source: membership.source || 'payment-server'
+  };
+}
+
+function downloadConcurrency(value, config = {}) {
+  if (!isMember(config)) return 1;
+  const n = Number(value) || 4;
+  return Math.max(1, Math.min(8, n));
+}
+
+function createSpeedLimitStream({ bytesPerSecond = FREE_SPEED_LIMIT_BPS, shouldLimit = () => true } = {}) {
+  let nextAvailableAt = Date.now();
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      if (!shouldLimit()) {
+        nextAvailableAt = Date.now();
+        callback(null, chunk);
+        return;
+      }
+      const now = Date.now();
+      const waitMs = Math.max(0, nextAvailableAt - now);
+      nextAvailableAt = Math.max(now, nextAvailableAt) + Math.ceil((chunk.length / bytesPerSecond) * 1000);
+      setTimeout(() => callback(null, chunk), waitMs);
+    }
+  });
+}
+
+
+function safeName(input, fallback = 'untitled') {
+  const cleaned = String(input || fallback)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+  return cleaned || fallback;
+}
+
+function userDirName(item) {
+  const display = safeName(item.displayname || item.displayName || item.username || 'creator');
+  const username = safeName(item.username || 'unknown');
+  return `${display}(@${username})`;
+}
+
+function postFileBaseName(post, fallback = 'video') {
+  const title = safeName(post.title, fallback);
+  const publishedAt = post.created_at
+    ? dayjs(post.created_at).format('YYYY-MM-DD HH-mm-ss')
+    : 'unknown-time';
+  return `${title} - ${publishedAt}`;
+}
+
+async function ensureDir(dir) {
+  await fs.mkdir(dir, { recursive: true });
+}
+
+async function readJson(file, fallback) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJson(file, data) {
+  await ensureDir(path.dirname(file));
+  await fs.writeFile(file, JSON.stringify(data, null, 2));
+}
+
+async function readConfig() {
+  const defaults = {
+    downloadDir: path.join(app.getPath('downloads'), 'FansOne'),
+    concurrency: 1,
+    subscriptionType: 'subscribing',
+    membership: { plan: 'free' },
+    paymentServerUrl: PAYMENT_SERVER_URL,
+    pendingPayment: null
+  };
+  runtimeConfigCache = { ...defaults, ...(await readJson(CONFIG_PATH, {})) };
+  return runtimeConfigCache;
+}
+
+async function writeConfig(patch) {
+  const next = { ...(await readConfig()), ...patch };
+  await writeJson(CONFIG_PATH, next);
+  runtimeConfigCache = next;
+  return next;
+}
+
+function shouldApplyFreeSpeedLimit() {
+  return !isMember(runtimeConfigCache || {});
+}
+
+function emitPaymentEvent(payload) {
+  mainWindow?.webContents?.send('payment-event', payload);
+}
+
+function normalizePaymentServerUrl(value) {
+  return String(value || PAYMENT_SERVER_URL).trim().replace(/\/+$/, '') || PAYMENT_SERVER_URL;
+}
+
+async function restoreMainWindowPresentation(wasMaximized) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (wasMaximized && !mainWindow.isMaximized()) mainWindow.maximize();
+}
+
+async function openPaymentWindow(targetUrl) {
+  const url = String(targetUrl || '').trim();
+  if (!url) return;
+  const wasMaximized = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized());
+  if (paymentWindow && !paymentWindow.isDestroyed()) {
+    paymentWindow.focus();
+    await paymentWindow.loadURL(url);
+    await restoreMainWindowPresentation(wasMaximized);
+    return;
+  }
+  paymentWindow = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 960,
+    minHeight: 720,
+    resizable: true,
+    title: '会员支付',
+    modal: false,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#ffffff',
+    icon: path.join(__dirname, '../build/icon.png'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  paymentWindow.once('ready-to-show', () => {
+    if (paymentWindow && !paymentWindow.isDestroyed()) paymentWindow.show();
+    restoreMainWindowPresentation(wasMaximized).catch(() => {});
+  });
+  paymentWindow.on('closed', () => { paymentWindow = null; });
+  paymentWindow.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
+    if (paymentWindow && !paymentWindow.isDestroyed()) paymentWindow.loadURL(nextUrl).catch(() => {});
+    return { action: 'deny' };
+  });
+  paymentWindow.webContents.on('did-finish-load', () => {
+    paymentWindow?.webContents.insertCSS(`
+      html, body { overflow-x: hidden !important; }
+      ::-webkit-scrollbar { width: 0 !important; height: 0 !important; }
+    `).catch(() => {});
+  });
+  await paymentWindow.loadURL(url);
+  await restoreMainWindowPresentation(wasMaximized);
+}
+
+async function createPaymentServerOrder(payload = {}) {
+  const config = await readConfig();
+  const serverUrl = normalizePaymentServerUrl(payload.paymentServerUrl || config.paymentServerUrl);
+  const plan = payload.plan || 'monthly';
+  const data = await got.post(`${serverUrl}/create`, {
+    json: { plan },
+    responseType: 'json',
+    timeout: { request: 15000 },
+    retry: { limit: 0 }
+  }).json();
+  if (!data?.ok || !data.payment) throw new Error(data?.message || '创建支付订单失败。');
+  const pendingPayment = {
+    ...data.payment,
+    mode: 'server',
+    serverUrl,
+    plan,
+    createdAt: new Date().toISOString()
+  };
+  await writeConfig({ paymentServerUrl: serverUrl, pendingPayment });
+  startPaymentPolling(pendingPayment);
+  const openUrl = pendingPayment.openUrl || pendingPayment.payUrl || pendingPayment.url;
+  if (openUrl) await openPaymentWindow(openUrl);
+  return { ok: true, payment: pendingPayment };
+}
+
+async function queryPaymentServerOrder(payment) {
+  const config = await readConfig();
+  const serverUrl = normalizePaymentServerUrl(payment?.serverUrl || config.paymentServerUrl);
+  const outTradeNo = payment?.outTradeNo || payment?.out_trade_no;
+  if (!outTradeNo) throw new Error('缺少订单号。');
+  return got.get(`${serverUrl}/status`, {
+    searchParams: { out_trade_no: outTradeNo },
+    responseType: 'json',
+    timeout: { request: 15000 },
+    retry: { limit: 0 }
+  }).json();
+}
+
+async function activateServerMembership(membership = {}) {
+  const normalized = normalizeMembership(membership);
+  await writeConfig({ membership: normalized, pendingPayment: null });
+  emitPaymentEvent({ type: 'paid', membership: normalized });
+  if (paymentWindow && !paymentWindow.isDestroyed()) paymentWindow.close();
+  return normalized;
+}
+
+function startPaymentPolling(payment) {
+  if (paymentPollTimer) clearInterval(paymentPollTimer);
+  const startedAt = Date.now();
+  paymentPollTimer = setInterval(async () => {
+    try {
+      const data = await queryPaymentServerOrder(payment);
+      if (data?.paid && data.membership) {
+        clearInterval(paymentPollTimer);
+        paymentPollTimer = null;
+        await activateServerMembership(data.membership);
+      } else if (Date.now() - startedAt > 30 * 60 * 1000) {
+        clearInterval(paymentPollTimer);
+        paymentPollTimer = null;
+        emitPaymentEvent({ type: 'timeout' });
+      }
+    } catch (err) {
+      emitPaymentEvent({ type: 'poll-error', message: err.message || String(err) });
+    }
+  }, 5000);
+}
+
+
+function getFansoneSession() {
+  return session.fromPartition(LOGIN_PARTITION);
+}
+
+async function getCookieString() {
+  const cookies = await getFansoneSession().cookies.get({ url: BASE_URL });
+  return cookies.map(c => `${c.name}=${c.value}`).join('; ');
+}
+
+function parseCookieUser(cookieString) {
+  const info = {};
+  for (const part of cookieString.split(';')) {
+    const [rawName, ...rest] = part.trim().split('=');
+    const value = rest.join('=');
+    if (rawName === 'uid') info.uid = value;
+    if (rawName === 'userId') info.userId = value;
+    if (rawName === 'username') info.username = decodeURIComponent(value || '');
+  }
+  return info;
+}
+
+async function createApiClient() {
+  const cookieString = await getCookieString();
+  const user = parseCookieUser(cookieString);
+  if (!cookieString || !user.uid) {
+    throw new Error('尚未登录，或登录 cookie 中没有 uid。请先点击“登录/重新登录”。');
+  }
+  const client = axios.create({
+    baseURL: API_BASE,
+    timeout: 30000,
+    headers: {
+      Cookie: cookieString,
+      Referer: `${BASE_URL}/`,
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144 Safari/537.36'
+    }
+  });
+  return { client, user, cookieString };
+}
+
+async function apiGet(pathname, params) {
+  const { client } = await createApiClient();
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await client.get(pathname, { params });
+      if (response.status !== 200 || response.data?.success === false) {
+        throw new Error(response.data?.message || `API 请求失败: ${pathname}`);
+      }
+      return response.data;
+    } catch (err) {
+      if (attempt === 3) throw err;
+      await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+}
+
+async function apiGetAllPages(pathname, params, { limit = 100, maxPages = 200 } = {}) {
+  const first = await apiGet(pathname, { ...params, page: 1, limit });
+  const totalCount = Number(first.count ?? first.totalCount ?? first.total ?? 0);
+  const pageCount = totalCount ? Math.min(Math.ceil(totalCount / limit), maxPages) : 1;
+  const data = Array.isArray(first.data) ? [...first.data] : [];
+  for (let page = 2; page <= pageCount; page += 1) {
+    const next = await apiGet(pathname, { ...params, page, limit });
+    if (Array.isArray(next.data)) data.push(...next.data);
+  }
+  return { ...first, data, count: totalCount || data.length, totalCount: totalCount || data.length, pageCount };
+}
+
+async function getSubscriptions({ page = 1, limit = 100, type = 'subscribing', allPages = false } = {}) {
+  const { user } = await createApiClient();
+  const params = { uid: user.uid, type };
+  if (allPages) return apiGetAllPages('/subscription', params, { limit });
+  return apiGet('/subscription', { ...params, page, limit });
+}
+
+async function getPosts({ username, page = 1, limit = 100, type = 'all', allPages = false }) {
+  const { user } = await createApiClient();
+  const params = { uid: user.uid, username, type, isEnablePager: false };
+  if (allPages) return apiGetAllPages('/post', params, { limit });
+  return apiGet('/post', { ...params, page, limit });
+}
+
+async function getVideoSignedUrl(videoId, domain) {
+  const data = await apiGet('/bunny/signed-url', { videoId, domain });
+  return data.url;
+}
+
+function resolveUrl(baseUrl, target) {
+  return new URL(target, baseUrl).toString();
+}
+
+function parseM3u8(content, baseUrl) {
+  const lines = content.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const segments = [];
+  let nestedPlaylistUrl;
+  let encrypted = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.startsWith('#EXT-X-KEY') && !/METHOD=NONE/.test(line)) encrypted = true;
+    if (line.startsWith('#EXT-X-STREAM-INF')) {
+      const next = lines[i + 1];
+      if (next && !next.startsWith('#')) {
+        nestedPlaylistUrl = resolveUrl(baseUrl, next);
+        i += 1;
+      }
+      continue;
+    }
+    if (line.startsWith('#')) continue;
+    if (line.endsWith('.m3u8') && !nestedPlaylistUrl && segments.length === 0) {
+      nestedPlaylistUrl = resolveUrl(baseUrl, line);
+      continue;
+    }
+    segments.push(resolveUrl(baseUrl, line));
+  }
+  return { segments, nestedPlaylistUrl, encrypted };
+}
+
+function httpStatusCode(err) {
+  return Number(err?.response?.statusCode || err?.response?.status || err?.statusCode || err?.status || 0);
+}
+
+async function getPostVideoPlaylist(post, headers) {
+  let m3u8Url;
+  if (post.domain === 'video7.fansone.co') {
+    m3u8Url = `https://${post.domain}/${post.domain}/${post.video}/master.m3u8`;
+  } else {
+    m3u8Url = await getVideoSignedUrl(post.video, post.domain);
+  }
+  let text = await fetchTextWithRetry(m3u8Url, headers);
+  let parsed = parseM3u8(text, m3u8Url);
+  if (parsed.encrypted) throw new Error('检测到加密/DRM HLS，不会尝试绕过保护。');
+  if (parsed.segments.length === 0 && parsed.nestedPlaylistUrl) {
+    text = await fetchTextWithRetry(parsed.nestedPlaylistUrl, headers);
+    parsed = parseM3u8(text, parsed.nestedPlaylistUrl);
+    if (parsed.encrypted) throw new Error('检测到加密/DRM HLS，不会尝试绕过保护。');
+  }
+  if (!parsed.segments.length) throw new Error('没有找到视频分片。');
+  return { m3u8Url, parsed };
+}
+
+
+async function fetchFirstImageAsDataUrl(urls = []) {
+  const headers = {
+    Referer: `${BASE_URL}/`,
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144 Safari/537.36'
+  };
+  for (const url of urls) {
+    if (!url || !/^https?:\/\//.test(String(url))) continue;
+    try {
+      const response = await got.get(url, {
+        headers,
+        retry: { limit: 0 },
+        timeout: { request: 12000 },
+        throwHttpErrors: false,
+        responseType: 'buffer'
+      });
+      const contentType = response.headers['content-type'] || '';
+      if (response.statusCode >= 200 && response.statusCode < 300 && contentType.startsWith('image/')) {
+        return `data:${contentType.split(';')[0]};base64,${response.body.toString('base64')}`;
+      }
+    } catch {
+      // Try next candidate URL.
+    }
+  }
+  return null;
+}
+
+async function fetchTextWithRetry(url, headers) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return (await got.get(url, { headers, retry: { limit: 0 }, timeout: { request: HTTP_TIMEOUT_MS } })).body;
+    } catch (err) {
+      if (attempt === 3) throw err;
+      await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+}
+
+async function fileExistsNonEmpty(file) {
+  try {
+    const stat = await fs.stat(file);
+    return stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function fileSize(file) {
+  try {
+    const stat = await fs.stat(file);
+    return stat.size || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function resumeDownloadToFile(url, target, { headers = {}, signal, speedLimited = false, progressStream = null } = {}) {
+  if (await fileExistsNonEmpty(target)) return { skipped: true, size: await fileSize(target) };
+  const partTarget = `${target}.part`;
+  await ensureDir(path.dirname(target));
+  let existingBytes = await fileSize(partTarget);
+  const requestHeaders = existingBytes > 0 ? { ...headers, Range: `bytes=${existingBytes}-` } : headers;
+  const source = got.stream(url, { headers: requestHeaders, retry: { limit: 0 }, signal, timeout: { request: HTTP_TIMEOUT_MS } });
+  const responsePromise = once(source, 'response');
+  const errorPromise = once(source, 'error').then(([err]) => { throw err; });
+  const [response] = await Promise.race([responsePromise, errorPromise]);
+  if (existingBytes > 0 && response.statusCode === 200) {
+    // Server ignored Range; restart this partial file instead of appending duplicate bytes.
+    existingBytes = 0;
+    await fs.rm(partTarget, { force: true }).catch(() => {});
+  }
+  if (existingBytes > 0 && response.statusCode && response.statusCode !== 206) {
+    throw new Error(`服务器不支持断点续传，状态码 ${response.statusCode}`);
+  }
+  const output = createWriteStream(partTarget, { flags: existingBytes > 0 ? 'a' : 'w' });
+  const speedLimitCheck = typeof speedLimited === 'function' ? speedLimited : () => Boolean(speedLimited);
+  const streams = speedLimitCheck() || typeof speedLimited === 'function'
+    ? [source, createSpeedLimitStream({ shouldLimit: speedLimitCheck })]
+    : [source];
+  if (progressStream) streams.push(progressStream);
+  streams.push(output);
+  await pipeline(...streams);
+  await fs.rename(partTarget, target);
+  return { skipped: false, resumedBytes: existingBytes, size: await fileSize(target) };
+}
+
+async function pipeInto(file, writable) {
+  await new Promise((resolve, reject) => {
+    const input = createReadStream(file);
+    input.on('error', reject);
+    writable.on('error', reject);
+    input.on('end', resolve);
+    input.pipe(writable, { end: false });
+  });
+}
+
+async function concatFiles(files, outputPath) {
+  await ensureDir(path.dirname(outputPath));
+  const out = createWriteStream(outputPath);
+  try {
+    for (const file of files) {
+      await pipeInto(file, out);
+    }
+  } finally {
+    out.end();
+  }
+}
+
+function resolveBundledFfmpegPath() {
+  try {
+    const staticPath = require('ffmpeg-static');
+    if (staticPath) {
+      // In packaged Electron apps, executable resources unpacked from app.asar live under app.asar.unpacked.
+      if (app.isPackaged && staticPath.includes('app.asar')) {
+        return staticPath.replace('app.asar', 'app.asar.unpacked');
+      }
+      return staticPath;
+    }
+  } catch {
+    // Dependency may be absent in development on SMB/Linux; fall back below.
+  }
+  return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+}
+
+function hasFfmpeg(ffmpegPath) {
+  return new Promise(resolve => {
+    const proc = spawn(ffmpegPath, ['-version'], { windowsHide: true });
+    proc.on('error', () => resolve(false));
+    proc.on('close', code => resolve(code === 0));
+  });
+}
+
+async function remuxIfPossible(inputTs, outputMp4) {
+  const ffmpegPath = resolveBundledFfmpegPath();
+  if (!(await hasFfmpeg(ffmpegPath))) return null;
+  await new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, ['-y', '-i', inputTs, '-c', 'copy', '-movflags', '+faststart', outputMp4], { windowsHide: true });
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `ffmpeg exited ${code}`)));
+  });
+  return outputMp4;
+}
+
+class DownloadManager {
+  constructor(win) {
+    this.win = win;
+    // Each post already downloads segments/images concurrently; keep posts serial to avoid bulk-download stalls.
+    this.queue = new PQueue({ concurrency: 1 });
+    this.jobs = new Map();
+    this.cancelled = new Set();
+    this.running = new Set();
+    this.enqueued = new Set();
+    this.activeControllers = new Map();
+    this.paused = false;
+  }
+
+  emit(type, payload) {
+    this.win?.webContents?.send('download-event', { type, ...payload });
+  }
+
+  listJobs() {
+    return Array.from(this.jobs.values());
+  }
+
+  async loadState() {
+    const state = await readJson(STATE_PATH, { jobs: [], paused: false });
+    this.paused = Boolean(state.paused);
+    for (const saved of state.jobs || []) {
+      if (!saved?.jobId) continue;
+      const job = { ...saved };
+      if (['running', 'queued'].includes(job.status)) job.status = this.paused ? 'paused' : 'queued';
+      this.jobs.set(job.jobId, job);
+    }
+    if (this.paused) {
+      this.queue.pause();
+    } else {
+      for (const job of this.jobs.values()) {
+        if (job.status === 'queued') this.enqueueJob(job);
+      }
+      this.queue.start();
+      this.saveState().catch(() => {});
+    }
+    return this.listJobs();
+  }
+
+  async saveState() {
+    await writeJson(STATE_PATH, { paused: this.paused, jobs: this.listJobs().slice(-2000), updatedAt: new Date().toISOString() });
+  }
+
+  _trackController(jobId, controller) {
+    if (!this.activeControllers.has(jobId)) this.activeControllers.set(jobId, new Set());
+    this.activeControllers.get(jobId).add(controller);
+  }
+
+  _untrackController(jobId, controller) {
+    const controllers = this.activeControllers.get(jobId);
+    if (!controllers) return;
+    controllers.delete(controller);
+    if (!controllers.size) this.activeControllers.delete(jobId);
+  }
+
+  _abortJobStreams(jobId) {
+    for (const controller of this.activeControllers.get(jobId) || []) {
+      try { controller.abort(); } catch {}
+    }
+  }
+
+  _ensureRunnable(jobId) {
+    const job = this.jobs.get(jobId);
+    if (this.cancelled.has(jobId)) throw new Error('下载已取消');
+    if (this.paused || job?.pauseRequested) throw new DownloadPausedError();
+  }
+
+  enqueueJob(job) {
+    if (!job?.jobId || !job.post || this.enqueued.has(job.jobId) || this.running.has(job.jobId)) return false;
+    this.enqueued.add(job.jobId);
+    this.queue.add(async () => {
+      try {
+        await this.runJob(job.jobId, job.post);
+      } finally {
+        this.enqueued.delete(job.jobId);
+      }
+    });
+    return true;
+  }
+
+  cancel(jobId) {
+    this.cancelled.add(jobId);
+    this._abortJobStreams(jobId);
+    this.emit('job-log', { jobId, message: '已请求取消，正在停止当前下载。' });
+  }
+
+  pause() {
+    if (this.paused) return { paused: true };
+    this.paused = true;
+    this.queue.pause();
+    this.queue.clear();
+    this.enqueued.clear();
+    for (const job of this.jobs.values()) {
+      if (job.status === 'queued') {
+        job.status = 'paused';
+        job.speedText = '';
+        this.emit('job-updated', { job });
+      }
+    }
+    for (const jobId of this.running) {
+      const job = this.jobs.get(jobId);
+      if (job) {
+        job.pauseRequested = true;
+        job.resumeAfterPause = false;
+        job.status = 'paused';
+        job.speedText = '';
+        this.emit('job-updated', { job });
+      }
+      this._abortJobStreams(jobId);
+    }
+    this.saveState().catch(() => {});
+    this.emit('queue-state', { paused: true });
+    this.emit('job-log', { message: '下载队列已暂停：正在停止当前网络请求；已完成的分片/图片会保留。' });
+    return { paused: true };
+  }
+
+  resume() {
+    this.paused = false;
+    let queued = 0;
+    for (const job of this.jobs.values()) {
+      if (job.status === 'paused' || job.status === 'queued') {
+        if (this.running.has(job.jobId)) {
+          job.resumeAfterPause = true;
+          job.status = 'paused';
+          this.emit('job-updated', { job });
+          continue;
+        }
+        job.pauseRequested = false;
+        job.resumeAfterPause = false;
+        job.status = 'queued';
+        job.error = null;
+        job.speedText = '';
+        this.emit('job-updated', { job });
+        if (this.enqueueJob(job)) queued += 1;
+      }
+    }
+    this.queue.start();
+    this.saveState().catch(() => {});
+    this.emit('queue-state', { paused: false });
+    this.emit('job-log', { message: `下载队列已继续：恢复 ${queued} 个任务，会自动跳过已完成的分片/图片。` });
+    return { paused: false, queued };
+  }
+
+  retryFailed() {
+    this.paused = false;
+    let queued = 0;
+    for (const job of this.jobs.values()) {
+      if (job.status !== 'error') continue;
+      job.pauseRequested = false;
+      job.resumeAfterPause = false;
+      job.status = 'queued';
+      job.error = null;
+      job.speedText = '';
+      this.emit('job-updated', { job });
+      if (this.enqueueJob(job)) queued += 1;
+    }
+    this.queue.start();
+    this.saveState().catch(() => {});
+    this.emit('queue-state', { paused: false });
+    this.emit('job-log', { message: `已重试失败任务：重新排队 ${queued} 个，会自动跳过已完成的分片/图片。` });
+    return { paused: false, queued };
+  }
+
+  clearRecords() {
+    const count = this.jobs.size;
+    this.paused = false;
+    this.queue.clear();
+    this.queue.start();
+    this.enqueued.clear();
+    for (const jobId of this.running) this._abortJobStreams(jobId);
+    this.running.clear();
+    this.cancelled.clear();
+    this.activeControllers.clear();
+    this.jobs.clear();
+    this.saveState().catch(() => {});
+    this.emit('queue-state', { paused: false });
+    this.emit('records-cleared', { count });
+    this.emit('job-log', { message: `已清空 ${count} 条下载记录，不会删除已下载文件。` });
+    return { ok: true, count };
+  }
+
+  addPosts(posts) {
+    const ids = [];
+    if (Array.isArray(posts) && posts.length && this.paused) {
+      this.paused = false;
+      this.queue.start();
+      this.emit('queue-state', { paused: false });
+      this.emit('job-log', { message: '已自动开始下载队列。' });
+    }
+    for (const post of posts) {
+      const postId = Number(post.id);
+      const existing = Array.from(this.jobs.values()).find(job => Number(job.postId) === postId && ['queued', 'running', 'paused', 'done'].includes(job.status));
+      if (existing) {
+        ids.push(existing.jobId);
+        if (existing.status === 'done') {
+          this.emit('job-log', { message: `已跳过已完成任务：${existing.title || post.title || post.id}` });
+        } else if (existing.status === 'paused') {
+          existing.pauseRequested = false;
+          existing.resumeAfterPause = false;
+          existing.status = 'queued';
+          existing.error = null;
+          existing.speedText = '';
+          this.emit('job-updated', { job: existing });
+          this.enqueueJob(existing);
+        }
+        continue;
+      }
+      const jobId = `${post.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const job = {
+        jobId,
+        postId: post.id,
+        title: post.title || '(无标题)',
+        username: post.username,
+        type: post.type,
+        status: 'queued',
+        progress: 0,
+        speedText: '',
+        transferText: '',
+        downloadedBytes: 0,
+        outputPath: null,
+        error: null,
+        pauseRequested: false,
+        resumeAfterPause: false,
+        post
+      };
+      this.jobs.set(jobId, job);
+      ids.push(jobId);
+      this.emit('job-updated', { job });
+      if (!this.paused) this.enqueueJob(job);
+    }
+    this.saveState().catch(() => {});
+    return ids;
+  }
+
+  async runJob(jobId, post) {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    try {
+      if (this.paused || job.pauseRequested) throw new DownloadPausedError();
+      if (job.status === 'done') return;
+      this.running.add(jobId);
+      job.pauseRequested = false;
+      job.resumeAfterPause = false;
+      job.status = 'running';
+      job.post = post;
+      job.startedAt = job.startedAt || Date.now();
+      updateJobTransfer(job, { progress: job.progress || 0, downloadedBytes: Number(job.downloadedBytes) || 0 });
+      this.emit('job-updated', { job });
+      await this.saveState();
+      if (post.type === 'VIDEO' && post.video) {
+        job.outputPath = await this.downloadVideo(jobId, post);
+      } else if (post.images) {
+        job.outputPath = await this.downloadImages(jobId, post);
+      } else {
+        throw new Error('这个帖子没有可下载的视频或图片。');
+      }
+      job.status = this.cancelled.has(jobId) ? 'cancelled' : 'done';
+      job.progress = job.status === 'done' ? 100 : job.progress;
+      job.pauseRequested = false;
+      job.resumeAfterPause = false;
+      if (job.status === 'done') {
+        job.speedText = '';
+        job.transferText = '';
+      }
+    } catch (err) {
+      if (err instanceof DownloadPausedError || job.pauseRequested) {
+        job.status = 'paused';
+        job.error = null;
+        job.speedText = '';
+      } else if (this.cancelled.has(jobId)) {
+        job.status = 'cancelled';
+        job.error = null;
+        job.speedText = '';
+      } else {
+        job.status = 'error';
+        job.error = err?.message || String(err);
+      }
+    } finally {
+      const shouldResume = job.status === 'paused' && job.resumeAfterPause && !this.paused && !this.cancelled.has(jobId);
+      this.running.delete(jobId);
+      this.cancelled.delete(jobId);
+      job.pauseRequested = false;
+      job.resumeAfterPause = false;
+      await this.saveState();
+      this.emit('job-updated', { job });
+      if (shouldResume) {
+        job.status = 'queued';
+        this.emit('job-updated', { job });
+        this.enqueueJob(job);
+        this.queue.start();
+        await this.saveState();
+      }
+    }
+  }
+
+  async downloadVideo(jobId, post) {
+    const config = await readConfig();
+    const headers = {
+      Referer: `${BASE_URL}/`,
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144 Safari/537.36'
+    };
+    const creatorDir = path.join(config.downloadDir, userDirName(post), 'videos');
+    const tempDir = path.join(config.downloadDir, '.tmp', `post-${post.id}`);
+    await ensureDir(creatorDir);
+    await ensureDir(tempDir);
+
+    const baseFile = postFileBaseName(post, 'video');
+    const mp4Output = path.join(creatorDir, `${baseFile}.mp4`);
+    const tsOutput = path.join(creatorDir, `${baseFile}.ts`);
+    if (await fileExistsNonEmpty(mp4Output)) {
+      this.emit('job-log', { jobId, message: `已存在成品视频，跳过下载：${mp4Output}` });
+      return mp4Output;
+    }
+    if (await fileExistsNonEmpty(tsOutput)) {
+      this.emit('job-log', { jobId, message: `已存在 TS 视频，跳过下载：${tsOutput}` });
+      return tsOutput;
+    }
+
+    const job = this.jobs.get(jobId);
+    if (job) {
+      job.speedText = '获取视频地址';
+      job.transferText = '准备中';
+      job.progress = Math.max(Number(job.progress) || 0, 1);
+      this.emit('job-updated', { job });
+      this.saveState().catch(() => {});
+    }
+
+    if (job) {
+      job.speedText = '读取播放清单';
+      job.progress = Math.max(Number(job.progress) || 0, 2);
+      this.emit('job-updated', { job });
+      this.saveState().catch(() => {});
+    }
+    let { m3u8Url, parsed } = await getPostVideoPlaylist(post, headers);
+    this.emit('job-log', { jobId, message: `读取播放清单：${m3u8Url}` });
+    if (job) {
+      job.speedText = '开始下载';
+      job.transferText = `0/${parsed.segments.length}`;
+      job.progress = Math.max(Number(job.progress) || 0, 3);
+      this.emit('job-updated', { job });
+      this.saveState().catch(() => {});
+    }
+
+    const queue = new PQueue({ concurrency: downloadConcurrency(config.concurrency, config) });
+    let done = 0;
+    let downloadedBytes = 0;
+    const files = parsed.segments.map((_, index) => path.join(tempDir, `${String(index).padStart(6, '0')}.ts`));
+    const completedAtStart = new Set();
+    for (const file of files) {
+      if (await fileExistsNonEmpty(file)) {
+        completedAtStart.add(file);
+        done += 1;
+        downloadedBytes += await fileSize(file);
+      }
+    }
+    if (done > 0 && job) {
+      updateJobTransfer(job, {
+        progress: Math.round((done / parsed.segments.length) * 90),
+        downloadedBytes,
+        totalItems: parsed.segments.length,
+        doneItems: done
+      });
+      job.transferText = `${done}/${parsed.segments.length} · 已恢复断点`;
+      this.emit('job-updated', { job });
+      this.saveState().catch(() => {});
+    }
+    const tasks = parsed.segments.map((segmentUrl, index) => queue.add(async () => {
+      this._ensureRunnable(jobId);
+      const target = files[index];
+      let currentSegmentUrl = segmentUrl;
+      if (completedAtStart.has(target)) return;
+      if (!(await fileExistsNonEmpty(target))) {
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          const controller = new AbortController();
+          this._trackController(jobId, controller);
+          try {
+            let partialBytes = await fileSize(`${target}.part`);
+            let lastLiveUpdateAt = 0;
+            const progressStream = new Transform({
+              transform: (chunk, _encoding, callback) => {
+                partialBytes += chunk.length;
+                const now = Date.now();
+                if (now - lastLiveUpdateAt > 900) {
+                  const liveJob = this.jobs.get(jobId);
+                  if (liveJob) {
+                    updateJobTransfer(liveJob, {
+                      progress: Math.max(Number(liveJob.progress) || 0, Math.round(((done + 0.5) / parsed.segments.length) * 90)),
+                      downloadedBytes: downloadedBytes + partialBytes,
+                      totalItems: parsed.segments.length,
+                      doneItems: done
+                    });
+                    liveJob.transferText = `${done}/${parsed.segments.length} · 当前分片下载中`;
+                    this.emit('job-updated', { job: liveJob });
+                    this.saveState().catch(() => {});
+                  }
+                  lastLiveUpdateAt = now;
+                }
+                callback(null, chunk);
+              }
+            });
+            await resumeDownloadToFile(currentSegmentUrl, target, {
+              headers,
+              signal: controller.signal,
+              speedLimited: shouldApplyFreeSpeedLimit,
+              progressStream
+            });
+            break;
+          } catch (err) {
+            if (this.paused || controller.signal.aborted) {
+              throw new DownloadPausedError();
+            }
+            if ([401, 403].includes(httpStatusCode(err)) && attempt < 3) {
+              const refreshed = await getPostVideoPlaylist(post, headers);
+              if (refreshed.parsed.segments.length === parsed.segments.length) {
+                m3u8Url = refreshed.m3u8Url;
+                parsed = refreshed.parsed;
+                currentSegmentUrl = parsed.segments[index] || currentSegmentUrl;
+                this.emit('job-log', { jobId, message: `分片链接失效，已刷新播放清单并重试：${path.basename(target)}` });
+              }
+              await sleep(500 * attempt);
+              continue;
+            }
+            if (attempt === 3) throw err;
+            await sleep(500 * 2 ** (attempt - 1));
+          } finally {
+            this._untrackController(jobId, controller);
+          }
+        }
+      }
+      this._ensureRunnable(jobId);
+      if (!(await fileExistsNonEmpty(target))) throw new Error(`分片下载不完整：${path.basename(target)}`);
+      downloadedBytes += await fileSize(target);
+      done += 1;
+      const job = this.jobs.get(jobId);
+      if (job) {
+        updateJobTransfer(job, {
+          progress: Math.round((done / parsed.segments.length) * 90),
+          downloadedBytes,
+          totalItems: parsed.segments.length,
+          doneItems: done
+        });
+        this.emit('job-updated', { job });
+        this.saveState().catch(() => {});
+      }
+    }));
+    const settled = await Promise.allSettled(tasks);
+    if (this.paused || this.jobs.get(jobId)?.pauseRequested) throw new DownloadPausedError();
+    const failed = settled.find((item) => item.status === 'rejected');
+    if (failed) throw failed.reason;
+    this._ensureRunnable(jobId);
+
+    await concatFiles(files, tsOutput);
+    const remuxJob = this.jobs.get(jobId);
+    if (remuxJob) { updateJobTransfer(remuxJob, { progress: 95, downloadedBytes }); remuxJob.speedText = '封装中'; this.emit('job-updated', { job: remuxJob }); }
+
+    const remuxed = await remuxIfPossible(tsOutput, mp4Output).catch(err => {
+      this.emit('job-log', { jobId, message: `ffmpeg 封装失败，保留 TS 文件：${err.message}` });
+      return null;
+    });
+    if (remuxed) {
+      await fs.rm(tsOutput, { force: true });
+      return remuxed;
+    }
+    this.emit('job-log', { jobId, message: '内置 ffmpeg 不可用，已输出可播放的 .ts 文件。' });
+    return tsOutput;
+  }
+
+  async downloadImages(jobId, post) {
+    const config = await readConfig();
+    const urls = String(post.images || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!urls.length) throw new Error('没有图片地址。');
+    const outputDir = path.join(config.downloadDir, userDirName(post), 'photos');
+    await ensureDir(outputDir);
+    const baseFile = postFileBaseName(post, 'photo');
+    const targets = urls.map((url, index) => {
+      const ext = path.extname(new URL(url).pathname) || '.jpg';
+      return path.join(outputDir, `${baseFile}-${index + 1}${ext}`);
+    });
+    if ((await Promise.all(targets.map(fileExistsNonEmpty))).every(Boolean)) {
+      this.emit('job-log', { jobId, message: `图片已全部存在，跳过下载：${outputDir}` });
+      return outputDir;
+    }
+
+    const queue = new PQueue({ concurrency: downloadConcurrency(config.concurrency, config) });
+    let done = 0;
+    let downloadedBytes = 0;
+    const completedAtStart = new Set();
+    for (const target of targets) {
+      if (await fileExistsNonEmpty(target)) {
+        completedAtStart.add(target);
+        done += 1;
+        downloadedBytes += await fileSize(target);
+      }
+    }
+    const settled = await Promise.allSettled(urls.map((url, index) => queue.add(async () => {
+      this._ensureRunnable(jobId);
+      const target = targets[index];
+      if (completedAtStart.has(target)) return;
+      if (!(await fileExistsNonEmpty(target))) {
+        const controller = new AbortController();
+        this._trackController(jobId, controller);
+        try {
+          await resumeDownloadToFile(url, target, {
+            signal: controller.signal,
+            speedLimited: shouldApplyFreeSpeedLimit
+          });
+        } catch (err) {
+          if (this.paused || this.jobs.get(jobId)?.pauseRequested || controller.signal.aborted) {
+            throw new DownloadPausedError();
+          }
+          throw err;
+        } finally {
+          this._untrackController(jobId, controller);
+        }
+      }
+      this._ensureRunnable(jobId);
+      if (!(await fileExistsNonEmpty(target))) throw new Error(`图片下载不完整：${path.basename(target)}`);
+      downloadedBytes += await fileSize(target);
+      done += 1;
+      const job = this.jobs.get(jobId);
+      if (job) {
+        updateJobTransfer(job, {
+          progress: Math.round((done / urls.length) * 100),
+          downloadedBytes,
+          totalItems: urls.length,
+          doneItems: done
+        });
+        this.emit('job-updated', { job });
+        this.saveState().catch(() => {});
+      }
+    })));
+    if (this.paused || this.jobs.get(jobId)?.pauseRequested) throw new DownloadPausedError();
+    const failed = settled.find((item) => item.status === 'rejected');
+    if (failed) throw failed.reason;
+    return outputDir;
+  }
+}
+
+
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 420,
+    height: 300,
+    resizable: false,
+    frame: false,
+    show: false,
+    center: true,
+    backgroundColor: '#eef2f7',
+    icon: path.join(__dirname, '../build/icon.png'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  splashWindow.once('ready-to-show', () => {
+    if (splashWindow && !splashWindow.isDestroyed()) splashWindow.show();
+  });
+  splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+  splashWindow.on('closed', () => { splashWindow = null; });
+  return splashWindow;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+    splashWindow = null;
+  }
+}
+
+async function createMainWindow() {
+  await ensureDir(DATA_DIR);
+  Menu.setApplicationMenu(null);
+  createSplashWindow();
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 820,
+    minWidth: 1120,
+    minHeight: 760,
+    title: 'FansOne 下载器',
+    icon: path.join(__dirname, '../build/icon.png'),
+    show: false,
+    backgroundColor: '#eef2f7',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  await mainWindow.webContents.session.clearCache().catch(() => {});
+  downloadManager = new DownloadManager(mainWindow);
+  await downloadManager.loadState();
+  mainWindow.once('ready-to-show', showMainWindow);
+  mainWindow.webContents.once('did-finish-load', () => setTimeout(showMainWindow, 180));
+  mainWindow.on('close', () => {
+    downloadManager?.pause();
+  });
+  await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  const config = await readConfig();
+  if (config.pendingPayment) {
+    setTimeout(() => startPaymentPolling(config.pendingPayment), 1200);
+  }
+}
+
+app.whenReady().then(createMainWindow);
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
+
+ipcMain.handle('app:get-config', readConfig);
+ipcMain.handle('app:set-config', (_e, patch) => writeConfig(patch));
+ipcMain.handle('app:choose-download-dir', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
+  if (result.canceled || !result.filePaths[0]) return null;
+  return writeConfig({ downloadDir: result.filePaths[0] });
+});
+ipcMain.handle('app:open-path', (_e, target) => shell.openPath(target));
+ipcMain.handle('shell:open-external', (_e, target) => shell.openExternal(String(target || '')));
+ipcMain.handle('clipboard:write-text', (_e, text) => { clipboard.writeText(String(text || '')); return { ok: true }; });
+ipcMain.handle('update:check', () => checkUpdate());
+ipcMain.handle('ad:get-sidebar', () => getSidebarAd());
+ipcMain.handle('payment:start', (_e, payload) => createPaymentServerOrder(payload || {}));
+ipcMain.handle('app:get-state', async () => readJson(APP_STATE_PATH, {}));
+ipcMain.handle('app:set-state', async (_e, state) => {
+  await writeJson(APP_STATE_PATH, { ...(state || {}), savedAt: new Date().toISOString() });
+  return { ok: true };
+});
+ipcMain.handle('image:fetch-first', (_e, urls) => fetchFirstImageAsDataUrl(urls));
+
+ipcMain.handle('auth:status', async () => {
+  const cookieString = await getCookieString();
+  const user = parseCookieUser(cookieString);
+  return { loggedIn: Boolean(cookieString && user.uid), user };
+});
+
+ipcMain.handle('auth:open-login', async () => {
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.focus();
+    return;
+  }
+  loginWindow = new BrowserWindow({
+    width: 1100,
+    height: 800,
+    title: '登录 FansOne',
+    webPreferences: {
+      partition: LOGIN_PARTITION,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  loginWindow.on('closed', () => { loginWindow = null; mainWindow?.webContents?.send('auth-changed'); });
+  loginWindow.webContents.on('did-navigate', async (_event, url) => {
+    if (/fansone\.co\/(explore|home|subscription|creator|post)/.test(url)) {
+      mainWindow?.webContents?.send('auth-changed');
+    }
+  });
+  await loginWindow.loadURL(`${BASE_URL}/login`);
+});
+
+ipcMain.handle('auth:logout', async () => {
+  const ses = getFansoneSession();
+  await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'cachestorage'] });
+  return { ok: true };
+});
+
+ipcMain.handle('fansone:get-subscriptions', async (_e, params) => getSubscriptions(params));
+ipcMain.handle('fansone:get-posts', async (_e, params) => getPosts(params));
+ipcMain.handle('download:add-posts', async (_e, posts) => downloadManager.addPosts(posts));
+ipcMain.handle('download:list-jobs', async () => downloadManager.listJobs());
+ipcMain.handle('download:cancel', async (_e, jobId) => downloadManager.cancel(jobId));
+ipcMain.handle('download:pause', async () => downloadManager.pause());
+ipcMain.handle('download:resume', async () => downloadManager.resume());
+ipcMain.handle('download:retry-failed', async () => downloadManager.retryFailed());
+ipcMain.handle('download:clear-records', async () => downloadManager.clearRecords());
