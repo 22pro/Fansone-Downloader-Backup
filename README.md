@@ -50,6 +50,25 @@ Homepage / 官网：https://cangify.com
 - 支持中文 / 英文界面。
 - 提供 Windows 与 macOS 版本。
 
+
+## Screenshots / 软件截图
+
+### Login Center / 登录中心
+
+![FO-BACKUP Login Center](docs/images/fo-backup-login.png)
+
+### Large Download Queue / 大批量下载状态
+
+![FO-BACKUP Large Download Queue](docs/images/fo-backup-downloads-large-queue.png)
+
+### Download Settings / 下载设置
+
+![FO-BACKUP Download Settings](docs/images/fo-backup-settings.png)
+
+### About / 关于软件
+
+![FO-BACKUP About](docs/images/fo-backup-about.png)
+
 ## Download / 下载
 
 Please download the latest version from the GitHub Releases page:
