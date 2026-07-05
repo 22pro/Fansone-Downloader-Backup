@@ -1,8 +1,8 @@
 # Fansone Downloader Backup / FansOne 内容下载备份工具
 
-**Fansone Downloader Backup** is a desktop tool for backing up FansOne videos and images that your own account is allowed to access.
+**Fansone Downloader Backup** is a free desktop tool for backing up FansOne videos and images that your own account is allowed to access.
 
-**Fansone Downloader Backup** 是一款 FansOne 内容下载与备份工具，用于将你自己的账号已订阅、已授权访问的视频和图片保存到本地。
+**Fansone Downloader Backup** 是一款免费的 FansOne 内容下载与备份工具，用于将你自己的账号已订阅、已授权访问的视频和图片保存到本地。
 
 Homepage / 官网：https://cangify.com
 
@@ -10,14 +10,31 @@ Homepage / 官网：https://cangify.com
 >
 > 请仅用于备份你自己的账号有权限访问的 FansOne 内容。本工具适合个人备份、资料归档和内容整理。
 
+## Current Version / 当前版本
+
+**v1.0.10**
+
+- Free version: paid membership and payment features have been removed.
+- No built-in free-plan speed limit.
+- Download concurrency can be configured in the app.
+- Improved responsiveness for large download queues, especially 400+ videos.
+
+---
+
+- 免费版本：已移除会员收费和支付功能。
+- 不再内置免费版限速。
+- 下载并发可在软件中自行设置。
+- 优化大量下载任务的界面响应，尤其是 400+ 视频任务场景。
+
 ## Main Features / 主要功能
 
 - Log in with your FansOne account and load accessible subscriptions, creators, and posts.
 - Back up videos and images that your account can normally view/access.
 - Select creators and posts, then batch download selected content.
 - Download video segments with resume support, progress display, speed display, and task logs.
+- Optimized task monitor for large queues to reduce UI freezing.
 - Merge downloaded video segments and package them as MP4 when possible.
-- Configure the local output folder.
+- Configure the local output folder and download concurrency.
 - Chinese / English interface.
 - Windows and macOS packages.
 
@@ -27,8 +44,9 @@ Homepage / 官网：https://cangify.com
 - 支持备份当前账号可正常查看和访问的视频、图片资源。
 - 支持按作者、帖子选择内容，并批量下载选中的资源。
 - 支持视频分片下载、断点续传、下载进度、实时速度和任务日志显示。
+- 下载状态页已针对大量任务优化，减少界面卡顿。
 - 视频分片下载完成后会自动合并，并尽可能封装为 MP4。
-- 支持自定义本地保存目录。
+- 支持自定义本地保存目录和下载并发。
 - 支持中文 / 英文界面。
 - 提供 Windows 与 macOS 版本。
 
@@ -38,11 +56,11 @@ Please download the latest version from the GitHub Releases page:
 
 请在 GitHub Releases 页面下载最新版：
 
-- Windows x64 Installer: `FansOneDownloader-*-x64-installer.exe`
-- Windows x64 Portable: `FansOneDownloader-*-x64-portable.exe`
-- macOS Intel x64: `FansOneDownloader-*-mac.zip`
-- macOS Apple Silicon arm64: `FansOneDownloader-*-arm64-mac.zip`
-- Checksums: `SHA256SUMS-*.txt`
+- Windows x64 Installer: `FansOneDownloader-1.0.10-x64-installer.exe`
+- Windows x64 Portable: `FansOneDownloader-1.0.10-x64-portable.exe`
+- macOS Intel x64: `FansOneDownloader-1.0.10-mac.zip`
+- macOS Apple Silicon arm64: `FansOneDownloader-1.0.10-arm64-mac.zip`
+- Checksums: `SHA256SUMS-1.0.10.txt`
 
 ## Usage / 使用方法
 
@@ -67,12 +85,14 @@ Please download the latest version from the GitHub Releases page:
 - macOS packages may be unsigned. If blocked on first launch, right-click the app and choose **Open**, or allow it in **System Settings → Privacy & Security**.
 - The default output folder is `FansOne` under your system Downloads directory, unless you choose another folder in the app.
 - Video files are downloaded in segments first, then merged after all required segments are complete.
+- For very large batches, the task list may hide older rows to keep the app responsive; the summary counts still include all tasks.
 
 ---
 
 - macOS 包可能未进行 Apple 签名。如果首次打开被系统拦截，可右键选择“打开”，或到“系统设置 → 隐私与安全性”中允许打开。
 - 默认保存位置是系统下载目录下的 `FansOne` 文件夹，也可以在软件中自行选择其他目录。
 - 视频会先按分片下载，所有必要分片完成后再自动合并。
+- 大批量任务时，任务列表可能隐藏较早的行以保持软件流畅；顶部统计仍包含全部任务。
 
 ## Important / 重要提醒
 

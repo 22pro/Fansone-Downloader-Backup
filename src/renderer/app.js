@@ -12,9 +12,14 @@ const selectedSubscriptionUsernames = new Set();
 const jobs = new Map();
 const completedPostIds = new Set();
 const downloadingPostIds = new Set();
+const visiblePostIds = new Set();
 let downloadsPaused = false;
 let persistTimer = null;
-let membershipRefreshTimer = null;
+let jobsRenderTimer = null;
+let postsRenderTimer = null;
+const JOB_RENDER_INTERVAL_MS = 250;
+const POST_RENDER_INTERVAL_MS = 600;
+const MAX_RENDERED_JOBS = 180;
 
 
 const originalTextNodes = new WeakMap();
@@ -30,8 +35,6 @@ const i18nMap = {
   '作者、帖子与下载任务': 'Creators, posts and download tasks',
   '下载状态': 'Download Status',
   '进度、速度与任务明细': 'Progress, speed and task details',
-  '会员权限': 'Membership',
-  '开通会员与权益状态': 'Plans and benefits',
   '下载设置': 'Download Settings',
   '目录、并发与软件更新': 'Folder, concurrency and updates',
   '关于软件': 'About',
@@ -48,8 +51,8 @@ const i18nMap = {
   '支持视频、图片和多作者批量下载': 'Download videos, photos, and multiple creators in batches',
   '状态监控': 'Status Monitor',
   '独立下载状态页展示速度和任务明细': 'Dedicated status page for speed and task details',
-  '会员加速': 'Member Acceleration',
-  '会员解除 100KB/s 限速并开放自定义并发': 'Members remove the 100KB/s limit and unlock custom concurrency',
+  '永久免费': 'Free Forever',
+  '下载不限速，分片并发可自由设置': 'No speed limit; segment concurrency is customizable',
   '管理订阅作者、筛选帖子；下载进度请到“下载状态”查看。': 'Manage subscribed creators and filter posts. Check download progress in Download Status.',
   '全部订阅项目': 'All subscriptions',
   '订阅中 - 付费': 'Active - Paid',
@@ -94,32 +97,6 @@ const i18nMap = {
   '任务明细': 'Task Details',
   '显示当前队列、已完成和失败任务': 'Shows queued, completed, and failed tasks',
   '暂无任务': 'No tasks',
-  '当前方案：免费会员': 'Current plan: Free',
-  '免费会员限速 100KB/s，分片并发固定为 1。': 'Free plan is limited to 100KB/s with segment concurrency fixed at 1.',
-  '会员解锁权限': 'Member Benefits',
-  '开通任意会员后解放 100KB/s 限速，并开放分片并发自定义设置。': 'Any paid plan removes the 100KB/s limit and unlocks custom segment concurrency.',
-  '我的会员': 'My Membership',
-  '当前等级：免费会员': 'Current level: Free',
-  '当前档位': 'Current Tier',
-  '免费会员': 'Free',
-  '到期时间': 'Expires At',
-  '剩余时间': 'Remaining',
-  '测试': 'Trial',
-  '测试会员': 'Trial Member',
-  '体验会员完整权限': 'Try all member features',
-  '解放 100KB/s 速度上限': 'Remove the 100KB/s speed limit',
-  '分片并发可自行调整': 'Custom segment concurrency',
-  '开通测试': 'Start Trial',
-  '入门': 'Starter',
-  '月度会员': 'Monthly Member',
-  '解锁下载权限设置': 'Unlock download permission settings',
-  '开通月度': 'Subscribe Monthly',
-  '推荐': 'Recommended',
-  '季度会员': 'Quarterly Member',
-  '开通季度': 'Subscribe Quarterly',
-  '长期': 'Long term',
-  '年度会员': 'Yearly Member',
-  '开通年度': 'Subscribe Yearly',
   '保存设置': 'Save Settings',
   '检查软件更新': 'Check for Updates',
   '保存目录': 'Save Folder',
@@ -151,7 +128,7 @@ const i18nMap = {
   '所有备份文件会保存到这里。': 'All backup files will be saved here.',
   '选择保存目录': 'Choose Save Folder',
   '下载参数': 'Download Parameters',
-  '会员可使用更高并发。': 'Members can use higher concurrency.',
+  '软件已永久免费开放，可按电脑和网络情况设置并发。': 'FO-BACKUP is now free; tune concurrency for your computer and network.',
   '分片并发': 'Segment Concurrency',
   'FO-BACKUP 是一款面向 FansOne 内容备份与整理的桌面工具，帮助你把订阅作者、视频和图片内容稳定保存到本地。': 'FO-BACKUP is a desktop tool for backing up and organizing FansOne content, helping you reliably save subscribed creators, videos, and photos locally.',
   '订阅内容备份': 'Subscription Content Backup',
@@ -160,18 +137,14 @@ const i18nMap = {
   '按作者、内容类型和发布时间整理文件，减少手动分类成本。': 'Organize files by creator, content type, and publish time to reduce manual sorting.',
   '任务更稳定': 'More Stable Tasks',
   '支持暂停恢复、失败提示、进度记录和已下载内容跳过。': 'Supports pause/resume, failure notices, progress tracking, and skipping already downloaded content.',
-  '会员可解除免费版限速，并开放分片并发自定义设置。': 'Members can remove the free-plan speed limit and customize segment concurrency.',
+  'FO-BACKUP 已取消收费功能，下载不限速，并开放分片并发自定义设置。': 'FO-BACKUP has removed paid features: no speed limit and customizable segment concurrency.',
   '官网：cangify.com': 'Website: cangify.com',
-  '当前版本：v1.0.7': 'Current version: v1.0.7',
+  '当前版本：v1.0.10': 'Current version: v1.0.10',
   '软件更新': 'Software Update',
   '正在检查更新…': 'Checking for updates…',
   '复制链接': 'Copy Link',
   '稍后': 'Later',
   '立即下载': 'Download Now',
-  '/5分钟': '/5 minutes',
-  '/30天': '/30 days',
-  '/90天': '/90 days',
-  '/365天': '/365 days'
 };
 
 function translateString(value) {
@@ -187,13 +160,6 @@ function translateString(value) {
     .replace(/已取消-免费/g, 'Cancelled-Free')
     .replace(/^已登录：(.+)$/, 'Logged in: $1')
     .replace(/已选 (\d+)/g, 'selected $1')
-    .replace(/^当前等级：/, 'Current level: ')
-    .replace(/^当前方案：/, 'Current plan: ')
-    .replace(/^已开通 (.+)｜到期 (.+)｜剩余 (.+)$/, 'Active $1 | Expires $2 | Remaining $3')
-    .replace(/^当前为免费会员｜原会员已过期｜分片并发固定 1$/, 'Current: Free | Previous membership expired | Segment concurrency fixed at 1')
-    .replace(/^当前为免费会员｜限速 100KB\/s｜分片并发固定 1$/, 'Current: Free | 100KB/s limit | Segment concurrency fixed at 1')
-    .replace(/^原会员已过期，当前限速 100KB\/s，分片并发固定为 1。$/, 'Previous membership expired. Current limit is 100KB/s, segment concurrency fixed at 1.')
-    .replace(/^会员已解锁：不限速，可自定义分片并发。到期时间 (.+)。$/, 'Member unlocked: no speed limit and custom segment concurrency. Expires $1.')
     .replace(/^当前版本 (.+) · 最新版本 (.+)$/, 'Current $1 · Latest $2')
     .replace(/^当前版本 (.+) · 最新版本 (.+) · (.+)$/, 'Current $1 · Latest $2 · $3')
     .replace(/^发现新版本 (.+)（重要更新）$/, 'New version found $1 (important)')
@@ -201,8 +167,7 @@ function translateString(value) {
     .replace(/^当前已是最新版本$/, 'You are on the latest version')
     .replace(/^暂无更新说明。$/, 'No release notes.')
     .replace(/^没有提供下载链接$/, 'No download link provided')
-    .replace(/限速 100KB\/s/g, '100KB/s limit')
-    .replace(/分片并发固定 1/g, 'segment concurrency fixed at 1');
+    .replace(/下载不限速/g, 'No speed limit');
 }
 
 function t(value) {
@@ -254,7 +219,6 @@ function setLanguageMode(nextMode) {
   languageMode = nextMode === 'en' ? 'en' : 'zh';
   localStorage.setItem('fansone-language', languageMode);
   switchView(localStorage.getItem('fansone-active-view') || 'loginView');
-  renderMembership();
   renderSubscriptions();
   renderPosts();
   renderJobs();
@@ -303,6 +267,24 @@ function schedulePersistState() {
   }, 350);
 }
 
+function scheduleRenderJobs({ immediate = false } = {}) {
+  if (jobsRenderTimer) return;
+  const delay = immediate ? 0 : JOB_RENDER_INTERVAL_MS;
+  jobsRenderTimer = setTimeout(() => {
+    jobsRenderTimer = null;
+    renderJobs();
+  }, delay);
+}
+
+function scheduleRenderPosts({ immediate = false } = {}) {
+  if (postsRenderTimer) return;
+  const delay = immediate ? 0 : POST_RENDER_INTERVAL_MS;
+  postsRenderTimer = setTimeout(() => {
+    postsRenderTimer = null;
+    renderPosts();
+  }, delay);
+}
+
 async function restoreSavedAppState() {
   const state = await api.getAppState?.();
   if (!state || typeof state !== 'object') return;
@@ -326,7 +308,7 @@ function setBusy(el, busy, text) {
   el.disabled = busy;
   if (busy && text) {
     el.classList.add('is-busy');
-    el.innerHTML = `<span>${escapeHtml(text)}</span><small>正在连接支付服务器，请稍候</small>`;
+    el.innerHTML = `<span>${escapeHtml(text)}</span><small>请稍候</small>`;
   } else {
     el.classList.remove('is-busy');
     el.innerHTML = el.dataset.idleHtml;
@@ -337,7 +319,6 @@ const viewMeta = {
   loginView: ['登录中心', '检查账号登录状态，确保后续订阅内容可以正常读取。'],
   subscriptionView: ['订阅详情', '管理订阅作者、筛选帖子。'],
   downloadView: ['下载状态', '集中查看下载进度、速度、剩余数量、当前文件与失败信息。'],
-  membershipView: ['会员权限', '查看会员状态，开通后解除限速并启用更高并发。'],
   settingsView: ['下载设置', '设置保存目录、下载并发，并检查软件更新。'],
   aboutView: ['关于软件', '查看软件介绍、版本信息和官网地址。']
 };
@@ -560,82 +541,9 @@ async function checkSoftwareUpdate({ startup = false } = {}) {
   }
 }
 
-function isMemberActive() {
-  const membership = config?.membership || {};
-  if (membership.plan !== 'member' || !membership.expiresAt) return false;
-  const expiresAt = new Date(membership.expiresAt).getTime();
-  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+function isFreeAccessUnlocked() {
+  return true;
 }
-
-function formatMembershipRemaining(expiresAt) {
-  const expiry = new Date(expiresAt).getTime();
-  if (!Number.isFinite(expiry)) return '--';
-  const diff = expiry - Date.now();
-  if (diff <= 0) return t('已过期');
-  const days = Math.floor(diff / 86400000);
-  const hours = Math.floor((diff % 86400000) / 3600000);
-  if (days >= 3650) return t('无限期');
-  if (days > 0) return languageMode === 'en' ? `${days} days ${hours} hours` : `${days} 天 ${hours} 小时`;
-  const minutes = Math.floor((diff % 3600000) / 60000);
-  const seconds = Math.floor((diff % 60000) / 1000);
-  if (hours > 0) return languageMode === 'en' ? `${hours} hours ${minutes} minutes` : `${hours} 小时 ${minutes} 分钟`;
-  if (minutes > 0) return languageMode === 'en' ? `${minutes} min ${seconds} sec` : `${minutes} 分 ${seconds} 秒`;
-  return languageMode === 'en' ? `${Math.max(0, seconds)} sec` : `${Math.max(0, seconds)} 秒`;
-}
-
-function renderMembership() {
-  const status = $('membershipStatus');
-  if (!config) return;
-  const membership = config.membership || { plan: 'free' };
-  const active = isMemberActive();
-  const label = active
-    ? t(({ test: '测试会员', monthly: '月度会员', quarterly: '季度会员', yearly: '年度会员', owner: 'Owner Unlimited' })[membership.tier] || membership.label || '会员')
-    : t('免费会员');
-  const expireText = active && membership.expiresAt ? new Date(membership.expiresAt).toLocaleString() : '--';
-  const remainText = active && membership.expiresAt ? formatMembershipRemaining(membership.expiresAt) : '--';
-
-  if (active) {
-    if (status) status.textContent = languageMode === 'en' ? `Current level: ${label} · Expires ${expireText}` : `当前等级：${label} · 到期 ${expireText}`;
-    if ($('membershipBannerTag')) $('membershipBannerTag').textContent = languageMode === 'en' ? `Current plan: ${label}` : `当前方案：${label}`;
-    if ($('membershipBannerDesc')) $('membershipBannerDesc').textContent = languageMode === 'en' ? `Member unlocked: no speed limit and custom segment concurrency. Expires ${expireText}.` : `会员已解锁：不限速，可自定义分片并发。到期时间 ${expireText}。`;
-    if ($('memberSummaryText')) $('memberSummaryText').textContent = languageMode === 'en' ? `Active ${label} | Expires ${expireText} | Remaining ${remainText}` : `已开通 ${label}｜到期 ${expireText}｜剩余 ${remainText}`;
-  } else if (membership.plan === 'member') {
-    if (status) status.textContent = languageMode === 'en' ? `Current level: Free · Previous membership expired: ${membership.expiresAt ? new Date(membership.expiresAt).toLocaleString() : 'Unknown'}` : `当前等级：免费会员 · 原会员已过期：${membership.expiresAt ? new Date(membership.expiresAt).toLocaleString() : '未知'}`;
-    if ($('membershipBannerTag')) $('membershipBannerTag').textContent = t('当前方案：免费会员');
-    if ($('membershipBannerDesc')) $('membershipBannerDesc').textContent = t('原会员已过期，当前限速 100KB/s，分片并发固定为 1。');
-    if ($('memberSummaryText')) $('memberSummaryText').textContent = t('当前为免费会员｜原会员已过期｜分片并发固定 1');
-  } else {
-    if (status) status.textContent = languageMode === 'en' ? 'Current level: Free · 100KB/s limit · Segment concurrency fixed at 1' : '当前等级：免费会员 · 限速 100KB/s · 分片并发固定 1';
-    if ($('membershipBannerTag')) $('membershipBannerTag').textContent = t('当前方案：免费会员');
-    if ($('membershipBannerDesc')) $('membershipBannerDesc').textContent = t('免费会员限速 100KB/s，分片并发固定为 1。');
-    if ($('memberSummaryText')) $('memberSummaryText').textContent = t('当前为免费会员｜限速 100KB/s｜分片并发固定 1');
-  }
-
-  if ($('memberTierText')) $('memberTierText').textContent = label;
-  if ($('memberExpireText')) $('memberExpireText').textContent = expireText;
-  if ($('memberRemainText')) $('memberRemainText').textContent = remainText;
-  if ($('concurrencyInput')) {
-    $('concurrencyInput').disabled = !active;
-    if (!active) $('concurrencyInput').value = 1;
-  }
-  refreshLanguageSoon();
-}
-
-async function startMembershipPayment(plan) {
-  const button = document.querySelector(`.startPayment[data-plan="${plan}"]`);
-  try {
-    setBusy(button, true, '创建订单中…');
-    const result = await api.startPayment({ plan });
-    config = { ...config, pendingPayment: result.payment };
-    if ($('membershipStatus')) $('membershipStatus').textContent = `支付窗口已打开，订单号：${result.payment.outTradeNo || result.payment.out_trade_no || '待支付'}`;
-    log(`已创建会员订单：${result.payment.outTradeNo || result.payment.out_trade_no || ''}`);
-  } catch (err) {
-    alert(`发起支付失败：${err.message || err}`);
-  } finally {
-    setBusy(button, false);
-  }
-}
-
 
 
 function mediaPlaceholder(kind = 'video') {
@@ -706,9 +614,8 @@ function applySubscriptionFilter() {
 async function refreshConfig() {
   config = await api.getConfig();
   $('downloadDir').textContent = config.downloadDir;
-  $('concurrencyInput').value = isMemberActive() ? (config.concurrency || 1) : 1;
+  $('concurrencyInput').value = config.concurrency || 4;
   $('subscriptionType').value = config.subscriptionType || 'all';
-  renderMembership();
   refreshLanguageSoon();
 }
 
@@ -827,11 +734,14 @@ function renderPosts() {
   const root = $('posts');
   $('postsCount').textContent = languageMode === 'en' ? `Total ${posts.length}` : `共 ${posts.length} 条`;
   if (!posts.length) {
+    visiblePostIds.clear();
     root.className = 'list empty';
     root.textContent = activeUsername ? t('没有加载到帖子。') : t('请选择一个作者，或勾选多个作者后点击“加载选中作者帖子”。');
     refreshLanguageSoon();
     return;
   }
+  visiblePostIds.clear();
+  for (const post of posts) visiblePostIds.add(Number(post.id));
   root.className = 'list';
   root.innerHTML = '';
   for (const post of posts) {
@@ -952,6 +862,8 @@ function selectedPosts() {
 }
 
 function upsertJob(job) {
+  const previous = jobs.get(job.jobId);
+  const previousStatus = previous?.status;
   jobs.set(job.jobId, job);
   const postId = Number(job.postId);
   if (['queued', 'running'].includes(job.status)) {
@@ -960,9 +872,13 @@ function upsertJob(job) {
     downloadingPostIds.delete(postId);
   }
   if (job.status === 'done') completedPostIds.add(postId);
-  schedulePersistState();
-  renderJobs();
-  if (posts.some(post => Number(post.id) === postId)) renderPosts();
+
+  const statusChanged = previousStatus !== job.status;
+  if (statusChanged || ['done', 'error', 'cancelled', 'paused'].includes(job.status)) schedulePersistState();
+  scheduleRenderJobs();
+
+  // Re-render the large post grid only when badge state can change. Progress-only updates are ignored.
+  if (statusChanged && visiblePostIds.has(postId)) scheduleRenderPosts();
 }
 
 function statusText(status) {
@@ -1071,7 +987,11 @@ function renderJobs() {
   }
 
   root.className = 'jobs job-list';
-  root.innerHTML = list.map(renderJobRow).join('');
+  const visibleJobs = list.slice(0, MAX_RENDERED_JOBS);
+  const hiddenCount = Math.max(0, list.length - visibleJobs.length);
+  root.innerHTML = visibleJobs.map(renderJobRow).join('') + (hiddenCount
+    ? `<div class="list-truncated-note">${languageMode === 'en' ? `${hiddenCount} older completed tasks hidden to keep the app responsive.` : `已隐藏 ${hiddenCount} 条较早任务，避免大量任务时界面卡顿。`}</div>`
+    : '');
   refreshLanguageSoon();
 }
 
@@ -1087,12 +1007,13 @@ async function init() {
   const oldJobs = await api.listJobs();
   downloadsPaused = oldJobs.some(job => job.status === 'paused');
   oldJobs.forEach(upsertJob);
+  scheduleRenderJobs({ immediate: true });
 
   $('loginBtn').addEventListener('click', () => api.openLogin());
   $('logoutBtn').addEventListener('click', async () => { await api.logout(); await refreshAuth(); });
   $('chooseDirBtn').addEventListener('click', async () => { const next = await api.chooseDownloadDir(); if (next) await refreshConfig(); });
   $('saveConfigBtn').addEventListener('click', async () => {
-    await api.setConfig({ concurrency: isMemberActive() ? (Number($('concurrencyInput').value) || 1) : 1, subscriptionType: $('subscriptionType').value });
+    await api.setConfig({ concurrency: Number($('concurrencyInput').value) || 4, subscriptionType: $('subscriptionType').value });
     await refreshConfig();
     log('设置已保存');
   });
@@ -1160,28 +1081,11 @@ async function init() {
     log('更新链接已复制');
   });
   setTimeout(() => checkSoftwareUpdate({ startup: true }), 2500);
-  document.querySelectorAll('.startPayment').forEach(btn => {
-    btn.addEventListener('click', () => startMembershipPayment(btn.dataset.plan));
-  });
     api.onAuthChanged(refreshAuth);
-  api.onPaymentEvent?.(async (event) => {
-    if (event.type === 'paid') {
-      config = await api.getConfig();
-      renderMembership();
-      alert('支付成功，会员已自动开通。\n如功能未生效，请尝试重启软件。');
-    } else if (event.type === 'poll-error') {
-      log(`支付状态检查失败：${event.message}`);
-    } else if (event.type === 'timeout') {
-      if ($('membershipStatus')) $('membershipStatus').textContent = '支付检查超时，请重新发起支付或稍后重试。';
-      if ($('memberSummaryText')) $('memberSummaryText').textContent = '支付检查超时，请重新发起支付或稍后重试。';
-    }
-  });
-  if (membershipRefreshTimer) clearInterval(membershipRefreshTimer);
-  membershipRefreshTimer = setInterval(() => renderMembership(), 1000);
 
   api.onDownloadEvent((event) => {
     if (event.type === 'job-updated') upsertJob(event.job);
-    if (event.type === 'queue-state') { downloadsPaused = Boolean(event.paused); renderJobs(); renderPosts(); }
+    if (event.type === 'queue-state') { downloadsPaused = Boolean(event.paused); scheduleRenderJobs({ immediate: true }); scheduleRenderPosts({ immediate: true }); }
     if (event.type === 'records-cleared') {
       jobs.clear();
       completedPostIds.clear();

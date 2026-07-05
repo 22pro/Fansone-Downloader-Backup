@@ -44,10 +44,6 @@
           <span class="menu-icon">↓</span>
           <span><b>下载状态</b></span>
         </button>
-        <button class="menu-item" data-view="membershipView">
-          <span class="menu-icon">◆</span>
-          <span><b>会员权限</b></span>
-        </button>
         <button class="menu-item" data-view="settingsView">
           <span class="menu-icon">⚙</span>
           <span><b>下载设置</b></span>
@@ -100,7 +96,7 @@
           <section class="feature-card"><b>订阅管理</b><span>按付费/免费/取消状态筛选作者</span></section>
           <section class="feature-card"><b>批量备份</b><span>支持视频、图片和多作者批量下载</span></section>
           <section class="feature-card"><b>状态监控</b><span>独立下载状态页展示速度和任务明细</span></section>
-          <section class="feature-card"><b>会员加速</b><span>会员解除 100KB/s 限速并开放自定义并发</span></section>
+          <section class="feature-card"><b>永久免费</b><span>下载不限速，分片并发可自由设置</span></section>
         </div>
       </section>
 
@@ -209,86 +205,6 @@
         </section>
       </section>
 
-      <section id="membershipView" class="view">
-        <section class="membership-banner">
-          <div class="membership-banner-main">
-            <span id="membershipBannerTag">当前方案：免费会员</span>
-            <h3>会员权限</h3>
-            <p id="membershipBannerDesc">免费会员限速 100KB/s，分片并发固定为 1。</p>
-          </div>
-          <div class="membership-banner-side">
-            <strong>会员解锁权限</strong>
-            <p>开通任意会员后解放 100KB/s 限速，并开放分片并发自定义设置。</p>
-          </div>
-        </section>
-
-        <section class="member-summary-card">
-          <div class="member-summary-main">
-            <strong>我的会员</strong>
-            <p id="memberSummaryText">当前等级：免费会员</p>
-          </div>
-          <div class="member-summary-box">
-            <span>当前档位</span>
-            <b id="memberTierText">免费会员</b>
-          </div>
-          <div class="member-summary-box">
-            <span>到期时间</span>
-            <b id="memberExpireText">--</b>
-          </div>
-          <div class="member-summary-box">
-            <span>剩余时间</span>
-            <b id="memberRemainText">--</b>
-          </div>
-        </section>
-
-        <div class="plans-grid pricing-grid">
-          <button class="plan-card pricing-card test-plan startPayment" data-plan="test">
-            <span class="plan-tag">测试</span>
-            <strong>测试会员</strong>
-            <div class="plan-price"><b>¥1</b><small>/5分钟</small></div>
-            <ul>
-              <li>体验会员完整权限</li>
-              <li>解放 100KB/s 速度上限</li>
-              <li>分片并发可自行调整</li>
-            </ul>
-            <em>开通测试</em>
-          </button>
-          <button class="plan-card pricing-card startPayment" data-plan="monthly">
-            <span class="plan-tag">入门</span>
-            <strong>月度会员</strong>
-            <div class="plan-price"><b>¥15</b><small>/30天</small></div>
-            <ul>
-              <li>解锁下载权限设置</li>
-              <li>解放 100KB/s 速度上限</li>
-              <li>分片并发可自行调整</li>
-            </ul>
-            <em>开通月度</em>
-          </button>
-          <button class="plan-card pricing-card recommended startPayment" data-plan="quarterly">
-            <span class="plan-tag">推荐</span>
-            <strong>季度会员</strong>
-            <div class="plan-price"><b>¥45</b><small>/90天</small></div>
-            <ul>
-              <li>解锁下载权限设置</li>
-              <li>解放 100KB/s 速度上限</li>
-              <li>分片并发可自行调整</li>
-            </ul>
-            <em>开通季度</em>
-          </button>
-          <button class="plan-card pricing-card startPayment" data-plan="yearly">
-            <span class="plan-tag">长期</span>
-            <strong>年度会员</strong>
-            <div class="plan-price"><b>¥150</b><small>/365天</small></div>
-            <ul>
-              <li>解锁下载权限设置</li>
-              <li>解放 100KB/s 速度上限</li>
-              <li>分片并发可自行调整</li>
-            </ul>
-            <em>开通年度</em>
-          </button>
-        </div>
-      </section>
-
       <section id="settingsView" class="view">
         <div class="section-toolbar">
           <div>
@@ -312,7 +228,7 @@
             <div class="panel-head clean">
               <div>
                 <strong>下载参数</strong>
-                <span class="muted">会员可使用更高并发。</span>
+                <span class="muted">软件已永久免费开放，可按电脑和网络情况设置并发。</span>
               </div>
             </div>
             <div class="setting-row">
@@ -352,14 +268,14 @@
               <p>支持暂停恢复、失败提示、进度记录和已下载内容跳过。</p>
             </section>
             <section>
-              <strong>会员权限</strong>
-              <p>会员可解除免费版限速，并开放分片并发自定义设置。</p>
+              <strong>永久免费</strong>
+              <p>FO-BACKUP 已取消收费功能，下载不限速，并开放分片并发自定义设置。</p>
             </section>
           </div>
 
           <div class="about-footer">
             <button id="officialSiteBtn" class="about-link" type="button">官网：cangify.com</button>
-            <span>当前版本：v1.0.7</span>
+            <span>当前版本：v1.0.10</span>
           </div>
         </section>
       </section>

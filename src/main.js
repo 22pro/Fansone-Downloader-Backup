@@ -25,7 +25,6 @@ const API_BASE = `${BASE_URL}/api`;
 const HTTP_TIMEOUT_MS = 45 * 1000;
 const UPDATE_FEED_URL = 'https://cangify.com/globle/update/fo-backup.json';
 const SIDEBAR_AD_FEED_URL = 'https://cangify.com/globle/ads/fo-backup/fo-backup.json';
-const PAYMENT_SERVER_URL = 'https://cangify.com/globle/epay/fo-backup-pay';
 const FREE_SPEED_LIMIT_BPS = 100 * 1024;
 
 // Ubuntu 上 npm 安装的 Electron 常见 chrome-sandbox 权限不满足；本工具只加载本地 UI + FansOne 登录页。
@@ -33,10 +32,8 @@ app.commandLine.appendSwitch('no-sandbox');
 
 let mainWindow;
 let loginWindow;
-let paymentWindow;
 let splashWindow;
 let downloadManager;
-let paymentPollTimer = null;
 let runtimeConfigCache = null;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -166,47 +163,14 @@ function updateJobTransfer(job, { progress, downloadedBytes, totalItems, doneIte
   job.transferText = job.totalItems ? `${job.doneItems || 0}/${job.totalItems}` : '';
 }
 
-function isMember(config = {}) {
-  const membership = config.membership || {};
-  if (membership.plan !== 'member') return false;
-  if (!membership.expiresAt) return false;
-  const expiresAt = new Date(membership.expiresAt).getTime();
-  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+function isMember(_config = {}) {
+  // FO-BACKUP is now a free app: all local download privileges are always unlocked.
+  return true;
 }
 
-function planLabel(tier) {
-  return ({ test: '测试会员', monthly: '月度会员', quarterly: '季度会员', yearly: '年度会员' })[tier] || '会员';
-}
-
-function normalizeMembership(membership = {}) {
-  const tier = membership.tier || membership.planId || 'monthly';
-  const days = Number(membership.days || ({ test: 0, monthly: 30, quarterly: 90, yearly: 365 })[tier] || 30);
-  const minutes = Number(membership.minutes || ({ test: 5 })[tier] || 0);
-  const activatedAt = membership.activatedAt || new Date().toISOString();
-  const durationMs = minutes > 0 ? minutes * 60 * 1000 : days * 86400000;
-  const expiresAt = membership.expiresAt || new Date(Date.now() + durationMs).toISOString();
-  return {
-    ...membership,
-    plan: 'member',
-    tier,
-    days,
-    minutes,
-    activatedAt,
-    expiresAt,
-    goodsName: membership.goodsName || `FO-BACKUP ${planLabel(tier)}`,
-    permissions: {
-      downloadThreads: 8,
-      speedLimit: 0,
-      ...(membership.permissions || {})
-    },
-    source: membership.source || 'payment-server'
-  };
-}
-
-function downloadConcurrency(value, config = {}) {
-  if (!isMember(config)) return 1;
+function downloadConcurrency(value, _config = {}) {
   const n = Number(value) || 4;
-  return Math.max(1, Math.min(8, n));
+  return Math.max(1, Math.min(20, n));
 }
 
 function createSpeedLimitStream({ bytesPerSecond = FREE_SPEED_LIMIT_BPS, shouldLimit = () => true } = {}) {
@@ -270,11 +234,9 @@ async function writeJson(file, data) {
 async function readConfig() {
   const defaults = {
     downloadDir: path.join(app.getPath('downloads'), 'FansOne'),
-    concurrency: 1,
+    concurrency: 4,
     subscriptionType: 'subscribing',
-    membership: { plan: 'free' },
-    paymentServerUrl: PAYMENT_SERVER_URL,
-    pendingPayment: null
+    freeAccess: true
   };
   runtimeConfigCache = { ...defaults, ...(await readJson(CONFIG_PATH, {})) };
   return runtimeConfigCache;
@@ -288,134 +250,12 @@ async function writeConfig(patch) {
 }
 
 function shouldApplyFreeSpeedLimit() {
-  return !isMember(runtimeConfigCache || {});
-}
-
-function emitPaymentEvent(payload) {
-  mainWindow?.webContents?.send('payment-event', payload);
-}
-
-function normalizePaymentServerUrl(value) {
-  return String(value || PAYMENT_SERVER_URL).trim().replace(/\/+$/, '') || PAYMENT_SERVER_URL;
+  return false;
 }
 
 async function restoreMainWindowPresentation(wasMaximized) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (wasMaximized && !mainWindow.isMaximized()) mainWindow.maximize();
-}
-
-async function openPaymentWindow(targetUrl) {
-  const url = String(targetUrl || '').trim();
-  if (!url) return;
-  const wasMaximized = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized());
-  if (paymentWindow && !paymentWindow.isDestroyed()) {
-    paymentWindow.focus();
-    await paymentWindow.loadURL(url);
-    await restoreMainWindowPresentation(wasMaximized);
-    return;
-  }
-  paymentWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 960,
-    minHeight: 720,
-    resizable: true,
-    title: '会员支付',
-    modal: false,
-    show: false,
-    autoHideMenuBar: true,
-    backgroundColor: '#ffffff',
-    icon: path.join(__dirname, '../build/icon.png'),
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    }
-  });
-  paymentWindow.once('ready-to-show', () => {
-    if (paymentWindow && !paymentWindow.isDestroyed()) paymentWindow.show();
-    restoreMainWindowPresentation(wasMaximized).catch(() => {});
-  });
-  paymentWindow.on('closed', () => { paymentWindow = null; });
-  paymentWindow.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
-    if (paymentWindow && !paymentWindow.isDestroyed()) paymentWindow.loadURL(nextUrl).catch(() => {});
-    return { action: 'deny' };
-  });
-  paymentWindow.webContents.on('did-finish-load', () => {
-    paymentWindow?.webContents.insertCSS(`
-      html, body { overflow-x: hidden !important; }
-      ::-webkit-scrollbar { width: 0 !important; height: 0 !important; }
-    `).catch(() => {});
-  });
-  await paymentWindow.loadURL(url);
-  await restoreMainWindowPresentation(wasMaximized);
-}
-
-async function createPaymentServerOrder(payload = {}) {
-  const config = await readConfig();
-  const serverUrl = normalizePaymentServerUrl(payload.paymentServerUrl || config.paymentServerUrl);
-  const plan = payload.plan || 'monthly';
-  const data = await got.post(`${serverUrl}/create`, {
-    json: { plan },
-    responseType: 'json',
-    timeout: { request: 15000 },
-    retry: { limit: 0 }
-  }).json();
-  if (!data?.ok || !data.payment) throw new Error(data?.message || '创建支付订单失败。');
-  const pendingPayment = {
-    ...data.payment,
-    mode: 'server',
-    serverUrl,
-    plan,
-    createdAt: new Date().toISOString()
-  };
-  await writeConfig({ paymentServerUrl: serverUrl, pendingPayment });
-  startPaymentPolling(pendingPayment);
-  const openUrl = pendingPayment.openUrl || pendingPayment.payUrl || pendingPayment.url;
-  if (openUrl) await openPaymentWindow(openUrl);
-  return { ok: true, payment: pendingPayment };
-}
-
-async function queryPaymentServerOrder(payment) {
-  const config = await readConfig();
-  const serverUrl = normalizePaymentServerUrl(payment?.serverUrl || config.paymentServerUrl);
-  const outTradeNo = payment?.outTradeNo || payment?.out_trade_no;
-  if (!outTradeNo) throw new Error('缺少订单号。');
-  return got.get(`${serverUrl}/status`, {
-    searchParams: { out_trade_no: outTradeNo },
-    responseType: 'json',
-    timeout: { request: 15000 },
-    retry: { limit: 0 }
-  }).json();
-}
-
-async function activateServerMembership(membership = {}) {
-  const normalized = normalizeMembership(membership);
-  await writeConfig({ membership: normalized, pendingPayment: null });
-  emitPaymentEvent({ type: 'paid', membership: normalized });
-  if (paymentWindow && !paymentWindow.isDestroyed()) paymentWindow.close();
-  return normalized;
-}
-
-function startPaymentPolling(payment) {
-  if (paymentPollTimer) clearInterval(paymentPollTimer);
-  const startedAt = Date.now();
-  paymentPollTimer = setInterval(async () => {
-    try {
-      const data = await queryPaymentServerOrder(payment);
-      if (data?.paid && data.membership) {
-        clearInterval(paymentPollTimer);
-        paymentPollTimer = null;
-        await activateServerMembership(data.membership);
-      } else if (Date.now() - startedAt > 30 * 60 * 1000) {
-        clearInterval(paymentPollTimer);
-        paymentPollTimer = null;
-        emitPaymentEvent({ type: 'timeout' });
-      }
-    } catch (err) {
-      emitPaymentEvent({ type: 'poll-error', message: err.message || String(err) });
-    }
-  }, 5000);
 }
 
 
@@ -1307,10 +1147,6 @@ async function createMainWindow() {
     downloadManager?.pause();
   });
   await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  const config = await readConfig();
-  if (config.pendingPayment) {
-    setTimeout(() => startPaymentPolling(config.pendingPayment), 1200);
-  }
 }
 
 app.whenReady().then(createMainWindow);
@@ -1329,7 +1165,6 @@ ipcMain.handle('shell:open-external', (_e, target) => shell.openExternal(String(
 ipcMain.handle('clipboard:write-text', (_e, text) => { clipboard.writeText(String(text || '')); return { ok: true }; });
 ipcMain.handle('update:check', () => checkUpdate());
 ipcMain.handle('ad:get-sidebar', () => getSidebarAd());
-ipcMain.handle('payment:start', (_e, payload) => createPaymentServerOrder(payload || {}));
 ipcMain.handle('app:get-state', async () => readJson(APP_STATE_PATH, {}));
 ipcMain.handle('app:set-state', async (_e, state) => {
   await writeJson(APP_STATE_PATH, { ...(state || {}), savedAt: new Date().toISOString() });

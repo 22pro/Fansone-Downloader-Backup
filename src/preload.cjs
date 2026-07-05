@@ -12,8 +12,6 @@ contextBridge.exposeInMainWorld('fansoneApp', {
   getSidebarAd: () => ipcRenderer.invoke('ad:get-sidebar'),
   openExternal: (target) => ipcRenderer.invoke('shell:open-external', target),
   writeClipboard: (text) => ipcRenderer.invoke('clipboard:write-text', text),
-  startPayment: (payload) => ipcRenderer.invoke('payment:start', payload),
-  onPaymentEvent: (callback) => ipcRenderer.on('payment-event', (_event, payload) => callback(payload)),
 
   authStatus: () => ipcRenderer.invoke('auth:status'),
   openLogin: () => ipcRenderer.invoke('auth:open-login'),
