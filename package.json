@@ -1,16 +1,17 @@
 {
   "name": "fansone-desktop",
-  "version": "1.0.10",
+  "version": "1.0.10-local.1",
   "description": "FansOne desktop downloader",
   "main": "src/main.js",
   "scripts": {
-    "test": "node --check src/main.js && node --check src/preload.cjs",
+    "test": "npm run test:syntax && node --test test/*.test.mjs",
     "start": "ELECTRON_DISABLE_SANDBOX=true node node_modules/electron/cli.js --no-sandbox --disable-gpu .",
     "dev": "ELECTRON_DISABLE_SANDBOX=true node node_modules/electron/cli.js --no-sandbox --disable-gpu .",
     "start:win": "electron .",
     "dist:win": "electron-builder --win nsis portable --x64",
     "dist:win:portable": "electron-builder --win portable --x64",
-    "dist:win:installer": "electron-builder --win nsis --x64"
+    "dist:win:installer": "electron-builder --win nsis --x64",
+    "test:syntax": "node --check src/main.js && node --check src/preload.cjs && node --check src/hls-media.js && node --check src/renderer/app.js"
   },
   "keywords": [],
   "author": "",

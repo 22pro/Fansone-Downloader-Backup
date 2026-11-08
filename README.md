@@ -1,5 +1,9 @@
 # Fansone Downloader Backup / FansOne 内容下载备份工具
 
+> **Unofficial HLS repair fork:** This fork retains the history of [cangify/Fansone-Downloader-Backup](https://github.com/cangify/Fansone-Downloader-Backup) and adds `1.0.10-local.1`. It fixes fragmented MP4 initialization, independent audio, media validation, and retry/pause handling. See [repair notes and tests](docs/hls-repair.md).
+>
+> **非官方 HLS 修复分支：** 保留原项目历史，加入 `1.0.10-local.1` 修复，处理初始化段、独立音轨、成品校验与重试/暂停。详见[修复说明和测试](docs/hls-repair.md)。上游 `v1.0.10` 安装包不包含此补丁；本次更新仅发布源码，未提供新的安装包。
+
 **Fansone Downloader Backup** is a free desktop tool for backing up FansOne videos and images that your own account is allowed to access.
 
 **Fansone Downloader Backup** 是一款免费的 FansOne 内容下载与备份工具，用于将你自己的账号已订阅、已授权访问的视频和图片保存到本地。
@@ -10,7 +14,7 @@ Homepage / 官网：https://cangify.com
 >
 > 请仅用于备份你自己的账号有权限访问的 FansOne 内容。本工具适合个人备份、资料归档和内容整理。
 
-## Current Version / 当前版本
+## Upstream Version / 上游版本
 
 **v1.0.10**
 
@@ -137,6 +141,12 @@ npm start
 ```
 
 Syntax check / 语法检查：
+
+```bash
+npm run test:syntax
+```
+
+Full regression tests (Node.js 22+ and system FFmpeg/ffprobe required) / 完整回归测试（需要 Node.js 22+ 和系统 FFmpeg/ffprobe）：
 
 ```bash
 npm test

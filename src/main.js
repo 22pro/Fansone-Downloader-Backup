@@ -12,6 +12,7 @@ import axios from 'axios';
 import dayjs from 'dayjs';
 import PQueue from 'p-queue';
 import got from 'got';
+import { resolveSources, trackCacheId, findFfmpeg, joinFiles, validateMedia, muxTracks } from './hls-media.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -308,7 +309,7 @@ async function apiGet(pathname, params) {
       }
       return response.data;
     } catch (err) {
-      if (attempt === 3) throw err;
+      if ([401, 403].includes(httpStatusCode(err)) || attempt === 3) throw err;
       await sleep(500 * 2 ** (attempt - 1));
     }
   }
@@ -349,53 +350,15 @@ function resolveUrl(baseUrl, target) {
   return new URL(target, baseUrl).toString();
 }
 
-function parseM3u8(content, baseUrl) {
-  const lines = content.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  const segments = [];
-  let nestedPlaylistUrl;
-  let encrypted = false;
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (line.startsWith('#EXT-X-KEY') && !/METHOD=NONE/.test(line)) encrypted = true;
-    if (line.startsWith('#EXT-X-STREAM-INF')) {
-      const next = lines[i + 1];
-      if (next && !next.startsWith('#')) {
-        nestedPlaylistUrl = resolveUrl(baseUrl, next);
-        i += 1;
-      }
-      continue;
-    }
-    if (line.startsWith('#')) continue;
-    if (line.endsWith('.m3u8') && !nestedPlaylistUrl && segments.length === 0) {
-      nestedPlaylistUrl = resolveUrl(baseUrl, line);
-      continue;
-    }
-    segments.push(resolveUrl(baseUrl, line));
-  }
-  return { segments, nestedPlaylistUrl, encrypted };
-}
-
 function httpStatusCode(err) {
   return Number(err?.response?.statusCode || err?.response?.status || err?.statusCode || err?.status || 0);
 }
 
 async function getPostVideoPlaylist(post, headers) {
-  let m3u8Url;
-  if (post.domain === 'video7.fansone.co') {
-    m3u8Url = `https://${post.domain}/${post.domain}/${post.video}/master.m3u8`;
-  } else {
-    m3u8Url = await getVideoSignedUrl(post.video, post.domain);
-  }
-  let text = await fetchTextWithRetry(m3u8Url, headers);
-  let parsed = parseM3u8(text, m3u8Url);
-  if (parsed.encrypted) throw new Error('检测到加密/DRM HLS，不会尝试绕过保护。');
-  if (parsed.segments.length === 0 && parsed.nestedPlaylistUrl) {
-    text = await fetchTextWithRetry(parsed.nestedPlaylistUrl, headers);
-    parsed = parseM3u8(text, parsed.nestedPlaylistUrl);
-    if (parsed.encrypted) throw new Error('检测到加密/DRM HLS，不会尝试绕过保护。');
-  }
-  if (!parsed.segments.length) throw new Error('没有找到视频分片。');
-  return { m3u8Url, parsed };
+  const url = post.domain === 'video7.fansone.co'
+    ? `https://${post.domain}/${post.domain}/${post.video}/master.m3u8`
+    : await getVideoSignedUrl(post.video, post.domain);
+  return resolveSources(url, target => fetchTextWithRetry(target, headers));
 }
 
 
@@ -430,7 +393,7 @@ async function fetchTextWithRetry(url, headers) {
     try {
       return (await got.get(url, { headers, retry: { limit: 0 }, timeout: { request: HTTP_TIMEOUT_MS } })).body;
     } catch (err) {
-      if (attempt === 3) throw err;
+      if ([401, 403].includes(httpStatusCode(err)) || attempt === 3) throw err;
       await sleep(500 * 2 ** (attempt - 1));
     }
   }
@@ -472,6 +435,13 @@ async function resumeDownloadToFile(url, target, { headers = {}, signal, speedLi
   if (existingBytes > 0 && response.statusCode && response.statusCode !== 206) {
     throw new Error(`服务器不支持断点续传，状态码 ${response.statusCode}`);
   }
+  if (existingBytes > 0) {
+    const contentRange = String(response.headers['content-range'] || '').match(/^bytes (\d+)-(\d+)\/(?:\d+|\*)$/);
+    if (!contentRange || Number(contentRange[1]) !== existingBytes) {
+      source.destroy();
+      throw new Error('服务器返回的续传范围不匹配，已保留原有分片。');
+    }
+  }
   const output = createWriteStream(partTarget, { flags: existingBytes > 0 ? 'a' : 'w' });
   const speedLimitCheck = typeof speedLimited === 'function' ? speedLimited : () => Boolean(speedLimited);
   const streams = speedLimitCheck() || typeof speedLimited === 'function'
@@ -482,28 +452,6 @@ async function resumeDownloadToFile(url, target, { headers = {}, signal, speedLi
   await pipeline(...streams);
   await fs.rename(partTarget, target);
   return { skipped: false, resumedBytes: existingBytes, size: await fileSize(target) };
-}
-
-async function pipeInto(file, writable) {
-  await new Promise((resolve, reject) => {
-    const input = createReadStream(file);
-    input.on('error', reject);
-    writable.on('error', reject);
-    input.on('end', resolve);
-    input.pipe(writable, { end: false });
-  });
-}
-
-async function concatFiles(files, outputPath) {
-  await ensureDir(path.dirname(outputPath));
-  const out = createWriteStream(outputPath);
-  try {
-    for (const file of files) {
-      await pipeInto(file, out);
-    }
-  } finally {
-    out.end();
-  }
 }
 
 function resolveBundledFfmpegPath() {
@@ -520,27 +468,6 @@ function resolveBundledFfmpegPath() {
     // Dependency may be absent in development on SMB/Linux; fall back below.
   }
   return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
-}
-
-function hasFfmpeg(ffmpegPath) {
-  return new Promise(resolve => {
-    const proc = spawn(ffmpegPath, ['-version'], { windowsHide: true });
-    proc.on('error', () => resolve(false));
-    proc.on('close', code => resolve(code === 0));
-  });
-}
-
-async function remuxIfPossible(inputTs, outputMp4) {
-  const ffmpegPath = resolveBundledFfmpegPath();
-  if (!(await hasFfmpeg(ffmpegPath))) return null;
-  await new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, ['-y', '-i', inputTs, '-c', 'copy', '-movflags', '+faststart', outputMp4], { windowsHide: true });
-    let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `ffmpeg exited ${code}`)));
-  });
-  return outputMp4;
 }
 
 class DownloadManager {
@@ -609,6 +536,7 @@ class DownloadManager {
 
   _ensureRunnable(jobId) {
     const job = this.jobs.get(jobId);
+    if (!job) throw new Error('下载任务已移除');
     if (this.cancelled.has(jobId)) throw new Error('下载已取消');
     if (this.paused || job?.pauseRequested) throw new DownloadPausedError();
   }
@@ -737,7 +665,7 @@ class DownloadManager {
     }
     for (const post of posts) {
       const postId = Number(post.id);
-      const existing = Array.from(this.jobs.values()).find(job => Number(job.postId) === postId && ['queued', 'running', 'paused', 'done'].includes(job.status));
+      const existing = Array.from(this.jobs.values()).find(job => Number(job.postId) === postId && ['queued', 'running', 'paused'].includes(job.status));
       if (existing) {
         ids.push(existing.jobId);
         if (existing.status === 'done') {
@@ -797,6 +725,7 @@ class DownloadManager {
       await this.saveState();
       if (post.type === 'VIDEO' && post.video) {
         job.outputPath = await this.downloadVideo(jobId, post);
+        job.mediaValidationVersion = 2;
       } else if (post.images) {
         job.outputPath = await this.downloadImages(jobId, post);
       } else {
@@ -843,174 +772,124 @@ class DownloadManager {
 
   async downloadVideo(jobId, post) {
     const config = await readConfig();
-    const headers = {
-      Referer: `${BASE_URL}/`,
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144 Safari/537.36'
-    };
+    const headers = { Referer: `${BASE_URL}/`, 'User-Agent': 'Mozilla/5.0' };
     const creatorDir = path.join(config.downloadDir, userDirName(post), 'videos');
-    const tempDir = path.join(config.downloadDir, '.tmp', `post-${post.id}`);
+    const tempDir = path.join(config.downloadDir, '.tmp', `post-${post.id}`, 'hls-v2');
     await ensureDir(creatorDir);
     await ensureDir(tempDir);
-
-    const baseFile = postFileBaseName(post, 'video');
-    const mp4Output = path.join(creatorDir, `${baseFile}.mp4`);
-    const tsOutput = path.join(creatorDir, `${baseFile}.ts`);
-    if (await fileExistsNonEmpty(mp4Output)) {
-      this.emit('job-log', { jobId, message: `已存在成品视频，跳过下载：${mp4Output}` });
-      return mp4Output;
-    }
-    if (await fileExistsNonEmpty(tsOutput)) {
-      this.emit('job-log', { jobId, message: `已存在 TS 视频，跳过下载：${tsOutput}` });
-      return tsOutput;
-    }
-
+    this._ensureRunnable(jobId);
     const job = this.jobs.get(jobId);
-    if (job) {
-      job.speedText = '获取视频地址';
-      job.transferText = '准备中';
-      job.progress = Math.max(Number(job.progress) || 0, 1);
+    const emitProgress = (progress, message, doneItems = 0, totalItems = 0, downloadedBytes = 0) => {
+      if (!job) return;
+      updateJobTransfer(job, { progress, doneItems, totalItems, downloadedBytes });
+      job.speedText = message;
       this.emit('job-updated', { job });
       this.saveState().catch(() => {});
-    }
-
-    if (job) {
-      job.speedText = '读取播放清单';
-      job.progress = Math.max(Number(job.progress) || 0, 2);
-      this.emit('job-updated', { job });
-      this.saveState().catch(() => {});
-    }
-    let { m3u8Url, parsed } = await getPostVideoPlaylist(post, headers);
-    this.emit('job-log', { jobId, message: `读取播放清单：${m3u8Url}` });
-    if (job) {
-      job.speedText = '开始下载';
-      job.transferText = `0/${parsed.segments.length}`;
-      job.progress = Math.max(Number(job.progress) || 0, 3);
-      this.emit('job-updated', { job });
-      this.saveState().catch(() => {});
-    }
-
-    const queue = new PQueue({ concurrency: downloadConcurrency(config.concurrency, config) });
-    let done = 0;
-    let downloadedBytes = 0;
-    const files = parsed.segments.map((_, index) => path.join(tempDir, `${String(index).padStart(6, '0')}.ts`));
-    const completedAtStart = new Set();
-    for (const file of files) {
-      if (await fileExistsNonEmpty(file)) {
-        completedAtStart.add(file);
-        done += 1;
-        downloadedBytes += await fileSize(file);
+    };
+    emitProgress(1, '检查封装工具');
+    const ffmpeg = await findFfmpeg(resolveBundledFfmpegPath());
+    emitProgress(2, '读取视频与音轨清单');
+    const sources = await getPostVideoPlaylist(post, headers);
+    this._ensureRunnable(jobId);
+    const expectations = { requireAudio: Boolean(sources.audio), videoDuration: sources.video.duration, audioDuration: sources.audio?.duration || 0 };
+    this.emit('job-log', { jobId, message: `已读取清单：视频 ${sources.video.segments.length} 段${sources.audio ? `，独立音轨 ${sources.audio.segments.length} 段` : ''}。` });
+    const baseFile = postFileBaseName(post, 'video');
+    let finalOutput = path.join(creatorDir, `${baseFile}.mp4`);
+    if (await fileExistsNonEmpty(finalOutput)) {
+      const validation = new AbortController();
+      this._trackController(jobId, validation);
+      try {
+        await validateMedia(ffmpeg, finalOutput, { ...expectations, signal: validation.signal });
+        this._ensureRunnable(jobId);
+        this.emit('job-log', { jobId, message: '已有 MP4 已通过音视频校验，跳过下载。' });
+        return finalOutput;
+      } catch (error) {
+        this._ensureRunnable(jobId);
+        if (validation.signal.aborted || error.name === 'AbortError') throw error;
+        // Never overwrite an existing user file, even if it fails validation.
+        finalOutput = path.join(creatorDir, `${baseFile}.repaired-${Date.now()}.mp4`);
+        this.emit('job-log', { jobId, message: '已有 MP4 未通过校验，将另存修复版并保留原件。' });
+      } finally {
+        this._untrackController(jobId, validation);
       }
+    } else {
+      // A zero-length user file also must not be overwritten.
+      try { await fs.access(finalOutput); finalOutput = path.join(creatorDir, `${baseFile}.repaired-${Date.now()}.mp4`); } catch {}
     }
-    if (done > 0 && job) {
-      updateJobTransfer(job, {
-        progress: Math.round((done / parsed.segments.length) * 90),
-        downloadedBytes,
-        totalItems: parsed.segments.length,
-        doneItems: done
-      });
-      job.transferText = `${done}/${parsed.segments.length} · 已恢复断点`;
-      this.emit('job-updated', { job });
-      this.saveState().catch(() => {});
-    }
-    const tasks = parsed.segments.map((segmentUrl, index) => queue.add(async () => {
+    const tracks = [['video', sources.video], ...(sources.audio ? [['audio', sources.audio]] : [])].map(([kind, track]) => {
+      const dir = path.join(tempDir, `${kind}-${trackCacheId(track)}`);
+      const items = [
+        ...(track.initUrl ? [{ url: track.initUrl, target: path.join(dir, 'init.mp4') }] : []),
+        ...track.segments.map((url, index) => ({ url, target: path.join(dir, `${String(index).padStart(6, '0')}.segment`) }))
+      ];
+      return { kind, track, items };
+    });
+    const items = tracks.flatMap(t => t.items);
+    let done = 0, downloadedBytes = 0;
+    const queue = new PQueue({ concurrency: downloadConcurrency(config.concurrency, config) });
+    let firstFailure = null;
+    const tasks = items.map(item => queue.add(async () => {
+      if (firstFailure) throw firstFailure;
       this._ensureRunnable(jobId);
-      const target = files[index];
-      let currentSegmentUrl = segmentUrl;
-      if (completedAtStart.has(target)) return;
-      if (!(await fileExistsNonEmpty(target))) {
-        for (let attempt = 1; attempt <= 3; attempt += 1) {
-          const controller = new AbortController();
-          this._trackController(jobId, controller);
-          try {
-            let partialBytes = await fileSize(`${target}.part`);
-            let lastLiveUpdateAt = 0;
-            const progressStream = new Transform({
-              transform: (chunk, _encoding, callback) => {
-                partialBytes += chunk.length;
-                const now = Date.now();
-                if (now - lastLiveUpdateAt > 900) {
-                  const liveJob = this.jobs.get(jobId);
-                  if (liveJob) {
-                    updateJobTransfer(liveJob, {
-                      progress: Math.max(Number(liveJob.progress) || 0, Math.round(((done + 0.5) / parsed.segments.length) * 90)),
-                      downloadedBytes: downloadedBytes + partialBytes,
-                      totalItems: parsed.segments.length,
-                      doneItems: done
-                    });
-                    liveJob.transferText = `${done}/${parsed.segments.length} · 当前分片下载中`;
-                    this.emit('job-updated', { job: liveJob });
-                    this.saveState().catch(() => {});
-                  }
-                  lastLiveUpdateAt = now;
-                }
-                callback(null, chunk);
-              }
-            });
-            await resumeDownloadToFile(currentSegmentUrl, target, {
-              headers,
-              signal: controller.signal,
-              speedLimited: shouldApplyFreeSpeedLimit,
-              progressStream
-            });
-            break;
-          } catch (err) {
-            if (this.paused || controller.signal.aborted) {
-              throw new DownloadPausedError();
-            }
-            if ([401, 403].includes(httpStatusCode(err)) && attempt < 3) {
-              const refreshed = await getPostVideoPlaylist(post, headers);
-              if (refreshed.parsed.segments.length === parsed.segments.length) {
-                m3u8Url = refreshed.m3u8Url;
-                parsed = refreshed.parsed;
-                currentSegmentUrl = parsed.segments[index] || currentSegmentUrl;
-                this.emit('job-log', { jobId, message: `分片链接失效，已刷新播放清单并重试：${path.basename(target)}` });
-              }
-              await sleep(500 * attempt);
-              continue;
-            }
-            if (attempt === 3) throw err;
-            await sleep(500 * 2 ** (attempt - 1));
-          } finally {
-            this._untrackController(jobId, controller);
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        if (firstFailure) throw firstFailure;
+        this._ensureRunnable(jobId);
+        const controller = new AbortController();
+        this._trackController(jobId, controller);
+        try {
+          await resumeDownloadToFile(item.url, item.target, { headers, signal: controller.signal, speedLimited: shouldApplyFreeSpeedLimit });
+          if (!(await fileExistsNonEmpty(item.target))) throw new Error('分片为空，未标记为完成。');
+          break;
+        } catch (error) {
+          if (this.paused || this.jobs.get(jobId)?.pauseRequested) throw new DownloadPausedError();
+          if (this.cancelled.has(jobId)) throw new Error('下载已取消');
+          this._ensureRunnable(jobId);
+          if (controller.signal.aborted) throw firstFailure || error;
+          const status = httpStatusCode(error);
+          if ([401, 403].includes(status)) {
+            firstFailure = new Error(`原站拒绝资源请求（HTTP ${status}），已停止。请先确认原站可正常播放；原文件及缓存已保留。`);
+            this._abortJobStreams(jobId);
+            throw firstFailure;
           }
+          if (firstFailure) throw firstFailure;
+          if (attempt === 3 || (status >= 400 && status < 500)) throw error;
+          await sleep(500 * attempt);
+          this._ensureRunnable(jobId);
+        } finally {
+          this._untrackController(jobId, controller);
         }
       }
       this._ensureRunnable(jobId);
-      if (!(await fileExistsNonEmpty(target))) throw new Error(`分片下载不完整：${path.basename(target)}`);
-      downloadedBytes += await fileSize(target);
+      const completedBytes = await fileSize(item.target);
+      downloadedBytes += completedBytes;
       done += 1;
-      const job = this.jobs.get(jobId);
-      if (job) {
-        updateJobTransfer(job, {
-          progress: Math.round((done / parsed.segments.length) * 90),
-          downloadedBytes,
-          totalItems: parsed.segments.length,
-          doneItems: done
-        });
-        this.emit('job-updated', { job });
-        this.saveState().catch(() => {});
-      }
-    }));
+      emitProgress(Math.round(done / items.length * 90), `${done}/${items.length} · 视频与音轨`, done, items.length, downloadedBytes);
+    }).catch(error => { firstFailure ||= error; throw error; }));
     const settled = await Promise.allSettled(tasks);
-    if (this.paused || this.jobs.get(jobId)?.pauseRequested) throw new DownloadPausedError();
-    const failed = settled.find((item) => item.status === 'rejected');
-    if (failed) throw failed.reason;
     this._ensureRunnable(jobId);
-
-    await concatFiles(files, tsOutput);
-    const remuxJob = this.jobs.get(jobId);
-    if (remuxJob) { updateJobTransfer(remuxJob, { progress: 95, downloadedBytes }); remuxJob.speedText = '封装中'; this.emit('job-updated', { job: remuxJob }); }
-
-    const remuxed = await remuxIfPossible(tsOutput, mp4Output).catch(err => {
-      this.emit('job-log', { jobId, message: `ffmpeg 封装失败，保留 TS 文件：${err.message}` });
-      return null;
-    });
-    if (remuxed) {
-      await fs.rm(tsOutput, { force: true });
-      return remuxed;
+    if (firstFailure) throw firstFailure;
+    const failed = settled.find(item => item.status === 'rejected');
+    if (failed) throw failed.reason;
+    const operation = new AbortController();
+    this._trackController(jobId, operation);
+    const workDir = await fs.mkdtemp(path.join(tempDir, 'work-'));
+    const assembled = tracks.map(t => path.join(workDir, `${t.kind}.${t.track.initUrl ? 'mp4' : 'ts'}`));
+    const candidate = path.join(workDir, 'output.mp4');
+    try {
+      emitProgress(94, '合并初始化段与媒体分片', done, items.length, downloadedBytes);
+      for (let i = 0; i < tracks.length; i += 1) await joinFiles(tracks[i].items.map(item => item.target), assembled[i], { signal: operation.signal });
+      this._ensureRunnable(jobId);
+      emitProgress(97, '无损封装并校验音视频', done, items.length, downloadedBytes);
+      await muxTracks(ffmpeg, assembled[0], assembled[1] || null, candidate, { ...expectations, signal: operation.signal });
+      this._ensureRunnable(jobId);
+      // Hard-link publication is atomic and refuses to overwrite a pre-existing file.
+      await fs.link(candidate, finalOutput);
+      this.emit('job-log', { jobId, message: 'MP4 已通过音视频校验；原 TS 和下载缓存均保留。' });
+      return finalOutput;
+    } finally {
+      this._untrackController(jobId, operation);
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
-    this.emit('job-log', { jobId, message: '内置 ffmpeg 不可用，已输出可播放的 .ts 文件。' });
-    return tsOutput;
   }
 
   async downloadImages(jobId, post) {

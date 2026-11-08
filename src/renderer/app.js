@@ -139,7 +139,7 @@ const i18nMap = {
   '支持暂停恢复、失败提示、进度记录和已下载内容跳过。': 'Supports pause/resume, failure notices, progress tracking, and skipping already downloaded content.',
   'FO-BACKUP 已取消收费功能，下载不限速，并开放分片并发自定义设置。': 'FO-BACKUP has removed paid features: no speed limit and customizable segment concurrency.',
   '官网：cangify.com': 'Website: cangify.com',
-  '当前版本：v1.0.10': 'Current version: v1.0.10',
+  '当前版本：v1.0.10（本地 HLS 修复版）': 'Current version: v1.0.10 (local HLS repair)',
   '软件更新': 'Software Update',
   '正在检查更新…': 'Checking for updates…',
   '复制链接': 'Copy Link',
@@ -871,7 +871,9 @@ function upsertJob(job) {
   } else {
     downloadingPostIds.delete(postId);
   }
-  if (job.status === 'done') completedPostIds.add(postId);
+  const validatedDone = Array.from(jobs.values()).some(item => Number(item.postId) === postId && item.status === 'done' && (item.type !== 'VIDEO' || item.mediaValidationVersion >= 2));
+  if (validatedDone) completedPostIds.add(postId);
+  else completedPostIds.delete(postId);
 
   const statusChanged = previousStatus !== job.status;
   if (statusChanged || ['done', 'error', 'cancelled', 'paused'].includes(job.status)) schedulePersistState();
