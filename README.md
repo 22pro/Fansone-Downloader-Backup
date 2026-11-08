@@ -1,8 +1,8 @@
 # Fansone Downloader Backup / FansOne 内容下载备份工具
 
-> **Unofficial HLS repair fork:** This fork retains the history of [cangify/Fansone-Downloader-Backup](https://github.com/cangify/Fansone-Downloader-Backup) and adds `1.0.10-local.1`. It fixes fragmented MP4 initialization, independent audio, media validation, and retry/pause handling. See [repair notes and tests](docs/hls-repair.md).
+> **Unofficial HLS repair fork:** This fork retains the history of [cangify/Fansone-Downloader-Backup](https://github.com/cangify/Fansone-Downloader-Backup) and adds `1.0.10-local.1`. It fixes fragmented MP4 initialization, independent audio, media validation, and retry/pause handling. See [repair notes and tests](docs/hls-repair.md) and [prebuilt repair packages](https://github.com/22pro/Fansone-Downloader-Backup/releases/tag/v1.0.10-local.1). The packages are not Developer ID/Authenticode signed; Windows runtime testing is pending.
 >
-> **非官方 HLS 修复分支：** 保留原项目历史，加入 `1.0.10-local.1` 修复，处理初始化段、独立音轨、成品校验与重试/暂停。详见[修复说明和测试](docs/hls-repair.md)。上游 `v1.0.10` 安装包不包含此补丁；本次更新仅发布源码，未提供新的安装包。
+> **非官方 HLS 修复分支：** 保留原项目历史，加入 `1.0.10-local.1` 修复，处理初始化段、独立音轨、成品校验与重试/暂停。详见[修复说明和测试](docs/hls-repair.md)。上游 `v1.0.10` 安装包不包含此补丁；修复版安装包（Mac Apple Silicon、Windows x64）已在 [v1.0.10-local.1 Release](https://github.com/22pro/Fansone-Downloader-Backup/releases/tag/v1.0.10-local.1) 提供，含 SHA-256 校验清单。包未做官方开发者签名，Windows 未实机验证，当前标记为预发布版。
 
 **Fansone Downloader Backup** is a free desktop tool for backing up FansOne videos and images that your own account is allowed to access.
 
